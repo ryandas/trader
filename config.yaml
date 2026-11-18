@@ -1,0 +1,33 @@
+capital: 5000            # starting capital (INR)
+monthly_contribution: 5000   # INR deposited at each month-end close (0 = lump sum only)
+risk_per_trade: 0.01     # fraction of equity risked per trade
+history_years: 10
+
+universe:
+  min_bars: 250
+  min_price: 50
+  min_median_value_cr: 10   # 20-day median traded value, crore INR
+  top_n: 50
+  loose_top_n: 150          # mean reversion universe
+
+momentum:                   # rotation strategy (trader momentum)
+  lookback: 126
+  skip: 21
+  top_n: 10
+  buffer: 10
+  bear_exit: true
+
+regime:
+  bear_policy: mean_reversion_only   # or: none
+  bear_size_mult: 0.5
+  min_stat_trades: 20
+
+risk:
+  max_position_pct: 0.20
+  max_positions: 10
+  max_per_sector: 3
+  max_heat: 0.06
+
+costs:                      # delivery equity; see CostCfg for statutory defaults
+  brokerage_per_order: 0    # check your Dhan plan
+  slippage_bps: 5

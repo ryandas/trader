@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import yaml
+from dotenv import load_dotenv
+from pydantic import BaseModel
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+class UniverseCfg(BaseModel):
+    min_bars: int = 250
+    min_price: float = 50
+    min_median_value_cr: float = 10
+    top_n: int = 50
+    loose_top_n: int = 150  # mean reversion trades a wider set
+
+
+class RegimeCfg(BaseModel):
+    bear_policy: str = "mean_reversion_only"  # or "none": no new entries in a bear market
+    bear_size_mult: float = 0.5  # risk-per-trade multiplier while the market is bearish
+    min_stat_trades: int = 20  # in-sample trades needed before a strategy/regime stat is trusted
+
+
+class RiskCfg(BaseModel):
+    max_position_pct: float = 0.20
+    max_positions: int = 10
+    max_per_sector: int = 3
+    max_heat: float = 0.06
+
+
+class CostCfg(BaseModel):
+    """Delivery (CNC) equity costs. Verify brokerage against your Dhan plan."""
+
+    brokerage_per_order: float = 0
+    slippage_bps: float = 5
+    stt_pct: float = 0.001  # both sides
+    exch_pct: float = 0.0000297  # NSE transaction charge
+    sebi_pct: float = 0.000001
+    stamp_pct: float = 0.00015  # buy side only
+    gst: float = 0.18  # on brokerage + exchange + sebi
+    dp_charge: float = 15.34  # per scrip, sell side
+
+
+class MomentumCfg(BaseModel):
+    lookback: int = 126  # trading days of return used for ranking
+    skip: int = 21  # most recent days excluded (short-term reversal)
+    top_n: int = 20
+    buffer: int = 10  # a holding is kept while its rank <= top_n + buffer (cuts turnover)
+    bear_exit: bool = True  # sell everything when the market turns bearish, not just at rebalance
+
+
+class Config(BaseModel):
+    capital: float = 100_000
+    monthly_contribution: float = 0  # INR added at each month-end close (paper sleeves and research harness)
+    risk_per_trade: float = 0.01
+    history_years: int = 10
+    min_size_fraction: float = 0.5  # skip orders cash-limited below this share of intended size
+    universe: UniverseCfg = UniverseCfg()
+    momentum: MomentumCfg = MomentumCfg()
+    regime: RegimeCfg = RegimeCfg()
+    risk: RiskCfg = RiskCfg()
+    costs: CostCfg = CostCfg()
+
+    @property
+    def data_dir(self) -> Path:
+        return ROOT / "data"
+
+    @property
+    def candles_dir(self) -> Path:
+        return self.data_dir / "candles"
+
+
+def load_config(path: Path | None = None) -> Config:
+    path = path or ROOT / "config.yaml"
+    raw = yaml.safe_load(path.read_text()) if path.exists() else {}
+    return Config(**(raw or {}))
+
+
+def dhan_credentials() -> tuple[str, str]:
+    load_dotenv(ROOT / ".env")
+    cid, tok = os.getenv("DHAN_CLIENT_ID"), os.getenv("DHAN_ACCESS_TOKEN")
+    if not cid or not tok:
+        raise SystemExit(
+            "DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN missing. Copy .env.example to .env "
+            "and fill them in (tokens expire, so regenerate from the Dhan web console)."
+        )
+    return cid, tok
