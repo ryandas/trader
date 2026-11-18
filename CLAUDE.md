@@ -92,7 +92,7 @@ Known quirks / limitations:
 
 ## Scheduling
 
-The daily paper run is a Hermes cron job at 09:15 Asia/Kolkata, Mon-Fri (schedule as stated by the owner; the cron definition lives outside this repo and was not inspected). It runs `/opt/data/scripts/trader_daily.sh` (outside this repo), which exits silently on NSE equity holidays listed in `/opt/data/scripts/nse_holidays_2026.txt` (2026 dates only, so it needs a new list for 2027) and otherwise runs `uv run trader daily` with a 1500 s timeout, logging to `/opt/data/cache/scratch/`.
+The daily paper run is a Hermes cron job at 09:15 Asia/Kolkata, Mon-Fri (schedule as stated by the owner; the cron definition lives outside this repo and was not inspected). It runs `scripts/trader_daily.sh` (in this repo; resolves paths relative to itself), which exits silently on NSE equity holidays listed in `scripts/nse_holidays_2026.txt` (2026 dates only, so it needs a new list for 2027) and otherwise runs `uv run trader daily` with a 1500 s timeout, logging to `$TRADER_LOG_DIR` (default `${TMPDIR:-/tmp}/trader-logs`). Its stdout is the Telegram message: the summary lines `trader daily` echoes plus the report path, or the last 40 log lines on failure. See `HANDOFF.md` for the Hermes handoff (what is Claude-only, what must be copied to a new host). `config.yaml` has `mode: paper` (`Config.mode`); live trading is deferred and no order-placing code exists in `src/`.
 
 ## Dhan MCP
 
