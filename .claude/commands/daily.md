@@ -12,7 +12,7 @@ or cancel an order**, and do not call `trading_agent_tool`.
    Also run `uv run trader fundamentals-snapshot --if-stale-days 7` (saves dated fundamentals for the research
    loop; it skips itself unless the newest copy is a week old; takes a few minutes when it does run).
 2. Read the report it wrote.
-3. Load the Dhan MCP tool schema with ToolSearch (`select:mcp__dhan__portfolio_agent_tool`) and
+3. **Claude-only; skipped under Hermes (Dhan MCP is not reachable there).** Load the Dhan MCP tool schema with ToolSearch (`select:mcp__dhan__portfolio_agent_tool`) and
    check the real account: funds, positions and holdings. Do not send any details beyond what the
    tool needs.
 4. Reply with a short summary:
