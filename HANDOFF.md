@@ -4,7 +4,7 @@ Paper trading only. Nothing in `src/` places orders, and `config.yaml` has `mode
 
 ## How the scheduled run works
 
-- Hermes cron, 09:15 Asia/Kolkata, Mon-Fri (schedule as stated by the owner; the cron definition itself lives in Hermes, outside this repo, and was not inspected).
+- Hermes cron, 16:30 Asia/Kolkata, Mon-Fri (schedule as stated by the owner; the cron definition itself lives in Hermes, outside this repo, and was not inspected).
 - It runs `scripts/trader_daily.sh`, which:
   1. resolves the repo and the holiday file relative to itself (override with `TRADER_HOLIDAYS_FILE`; logs go to `TRADER_LOG_DIR`, default `${TMPDIR:-/tmp}/trader-logs`);
   2. exits silently (empty stdout, nothing sent) if today's IST date is listed in `scripts/nse_holidays_2026.txt`;

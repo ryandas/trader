@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Paper-trading daily routine (NSE). Paper only: never places orders.
-# Scheduled by Hermes cron at 09:15 Asia/Kolkata, Mon-Fri. Skips NSE equity holidays
+# Scheduled by Hermes cron at 16:30 Asia/Kolkata, Mon-Fri (after the 16:00 data cutoff, so today's bar is final). Skips NSE equity holidays
 # (list: scripts/nse_holidays_2026.txt next to this script; 2026 only).
 # Empty stdout = nothing delivered. Stdout is the Telegram message, so keep it short.
 set -uo pipefail
