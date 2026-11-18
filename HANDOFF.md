@@ -14,14 +14,14 @@ Paper trading only. Nothing in `src/` places orders, and `config.yaml` has `mode
   - failure: `FAILED ...` plus the last 40 lines of the log.
 - The script uses nothing from Dhan MCP. Candles come from yfinance. Needs `uv` on PATH (`~/.local/bin` is added) and network access.
 
-## Weekly idea testing (Hermes cron)
+## Daily idea testing (Hermes cron)
 
-- Hermes cron job `trader-research-weekly`, Saturdays 10:00 Asia/Kolkata. It runs `scripts/research_weekly.sh` (wrapper at `/opt/data/scripts/research_weekly.sh`), which runs Claude Code in print mode for ONE idea of the `/research` loop.
-- Prompt: `.claude/commands/research.md` (frontmatter stripped, `$ARGUMENTS` = 1) plus `scripts/research_weekly_prompt.md` (unattended overrides).
+- Hermes cron job `trader-research-daily`, Mon-Fri 18:30 Asia/Kolkata (after the 16:30 paper run). Skips NSE holidays (same list as the paper run). It runs `scripts/research_daily.sh` (wrapper at `/opt/data/scripts/research_daily.sh`), which runs Claude Code in print mode for ONE idea of the `/research` loop.
+- Prompt: `.claude/commands/research.md` (frontmatter stripped, `$ARGUMENTS` = 1) plus `scripts/research_daily_prompt.md` (unattended overrides).
 - Guardrails: `research-promote` and `research-retire` are blocked in the tool allowlist, so any PASS or FORWARD_ONLY waits for the owner's approval. `evaluate.py` and `dsr.py` are checksummed before and after the run and restored from git if changed. The script refuses to start on a dirty repo.
 - Output: `reports/research/last_run.txt` (idea, verdict, deciding gate, trial count, promotion status, journal path) goes to Telegram. Changes are committed locally on success. Nothing is pushed.
-- Each run counts one trial in `data/research.db` (gitignored; local to this host). Trials are not shared across hosts.
-- Dry check without running Claude: `DRY_RUN=1 scripts/research_weekly.sh`.
+- Each run counts one trial in `data/research.db` (gitignored; local to this host). Trials are not shared across hosts. Every trial, pass or fail, raises the deflated-Sharpe bar for later ideas.
+- Dry check without running Claude: `DRY_RUN=1 scripts/research_daily.sh`.
 
 ## Holiday list
 
@@ -35,7 +35,7 @@ Paper trading only. Nothing in `src/` places orders, and `config.yaml` has `mode
 
 ## Claude-only (not part of the Hermes run)
 
-- Manual research runs (`/research N`, `trader research-*` by hand). The scheduled weekly run is described above.
+- Manual research runs (`/research N`, `trader research-*` by hand). The scheduled daily run is described above.
 - `/daily` (`.claude/commands/daily.md`) summary routine, including its Dhan MCP account check (step 3). Dhan MCP is reachable only from Claude Code, not Hermes.
 - `trader fundamentals-snapshot` (run from `/daily`, not from the script), `membership-snapshot` (about monthly, manual).
 
