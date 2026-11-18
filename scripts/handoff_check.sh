@@ -13,17 +13,15 @@ warn() { echo "warn  $*"; }
 command -v uv >/dev/null && ok "uv on PATH" || bad "uv not found (install from https://docs.astral.sh/uv/)"
 command -v timeout >/dev/null && ok "timeout" || bad "coreutils timeout missing"
 command -v claude >/dev/null && ok "claude CLI (needed only for research_daily.sh)" || warn "claude CLI missing: research_daily.sh cannot run"
-command -v sqlite3 >/dev/null && ok "sqlite3 (needed only for handoff_pack.sh)" || warn "sqlite3 missing"
 [ -f config.yaml ] && grep -qE '^mode:\s*paper' config.yaml && ok "config.yaml mode: paper" || bad "config.yaml missing or mode is not paper"
-[ -f data/paper.db ] && ok "data/paper.db present" || bad "data/paper.db missing: restore the state pack (do NOT run paper-momentum --reset)"
-[ -f data/research.db ] && ok "data/research.db present" || warn "data/research.db missing: trial count would restart (deflated-Sharpe bar resets)"
-[ -f data/instruments.csv ] && ok "data/instruments.csv present" || bad "data/instruments.csv missing: uv run trader init"
+[ -f .env ] && grep -q '^POSTGRES_HOST=.' .env && ok ".env has POSTGRES_* settings" || bad ".env missing POSTGRES_HOST/PORT/USER/PASSWORD/DB (see .env.example)"
+st="$(uv run trader db status 2>&1)" && { ok "database reachable"; echo "$st" | head -n 13; } \
+  || { bad "database not reachable (see POSTGRES_* in .env)"; echo "$st" | tail -n 3; }
+echo "$st" | grep -qE '^  paper_meta +[1-9]' && ok "paper ledger present in the database" || bad "no paper ledger in the database: do NOT run paper-momentum --reset, point .env at the right database"
 msg="$(scripts/trial_guard.sh)" && ok "$msg" || bad "$msg"
-ls data/candles/*.parquet >/dev/null 2>&1 && ok "candles present" || warn "no candles: first daily run will backfill 10y (slow)"
 ls scripts/nse_holidays_"$(TZ=Asia/Kolkata date +%Y)".txt >/dev/null 2>&1 \
   && ok "holiday list for $(TZ=Asia/Kolkata date +%Y)" || bad "no scripts/nse_holidays_$(TZ=Asia/Kolkata date +%Y).txt"
 [ -z "$(git status --porcelain)" ] && ok "git tree clean (research_daily.sh requires it)" || warn "git tree dirty: research_daily.sh will refuse to run"
-[ -f .env ] && warn ".env present (only used by --source dhan; yfinance run does not need it)" || ok "no .env needed for the default yfinance source"
 echo "tz: $(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M IST') (cron must be set to Asia/Kolkata)"
 
 uv sync --quiet 2>&1 | tail -n 3

@@ -50,7 +50,7 @@ Steps:
    `bear_exit`, `rebalance`) configure the rotation; every other key goes to `score`. Fundamentals ideas set
    `uses_fundamentals: True`, a single grid point, and read `prep.fund_panel("<field>")`.
    Add a unit test for the scoring logic in `tests/test_research.py` (or a new test file).
-4. `uv run pytest -q`, then `uv run trader research-eval <slug>`. Read `reports/research/<slug>/summary.md`.
+4. `uv run pytest -q`, then `uv run trader research-eval <slug>`. Read the stored summary with `uv run trader show research-eval <slug> summary` (folds and OOS equity are items `folds` / `oos_equity` of the same run).
 5. If the verdict is PASS or FORWARD_ONLY: `uv run trader research-promote <slug>` (adds a paper sleeve, max 5).
    If FAIL: do not promote. Work out whether it failed for an explainable reason (for example a cost or affordability
    effect at INR 5,000) and record that.

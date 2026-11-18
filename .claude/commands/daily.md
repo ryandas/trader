@@ -6,12 +6,12 @@ Run the daily routine for the systematic swing trader. This is read-only: **neve
 or cancel an order**, and do not call `trading_agent_tool`.
 
 1. Run `uv run trader daily` from the project root (refreshes candles, advances the paper ledger,
-   writes `reports/<date>.md` and `reports/<date>-orders.csv`). If it fails with a data or
+   stores the report and order tables in Postgres; read them with `uv run trader show daily [<date>] [orders|momentum-orders]`). If it fails with a data or
    network error, report it instead of retrying in a loop. If it prints a stale-data warning,
    say so prominently.
    Also run `uv run trader fundamentals-snapshot --if-stale-days 7` (saves dated fundamentals for the research
    loop; it skips itself unless the newest copy is a week old; takes a few minutes when it does run).
-2. Read the report it wrote.
+2. Read the report it stored: `uv run trader show daily`.
 3. **Claude-only; skipped under Hermes (Dhan MCP is not reachable there).** Load the Dhan MCP tool schema with ToolSearch (`select:mcp__dhan__portfolio_agent_tool`) and
    check the real account: funds, positions and holdings. Do not send any details beyond what the
    tool needs.

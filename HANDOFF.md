@@ -8,9 +8,9 @@ Paper trading only. Nothing in `src/` places orders, and `config.yaml` has `mode
 - It runs `scripts/trader_daily.sh`, which:
   1. resolves the repo and the holiday file relative to itself (override with `TRADER_HOLIDAYS_FILE`; logs go to `TRADER_LOG_DIR`, default `${TMPDIR:-/tmp}/trader-logs`);
   2. exits silently (empty stdout, nothing sent) if today's IST date is listed in `scripts/nse_holidays_2026.txt`;
-  3. otherwise runs `uv run trader daily` with a 1500 s timeout.
+  3. otherwise runs `uv run trader daily` with a 1500 s timeout, then stores the Telegram message and the full log in the `job_runs` table (a failure to log appends a warning but never changes the run's outcome).
 - Delivered to Telegram (stdout of the script):
-  - success: a header line, then the lines `trader daily` echoes (date and regime, momentum sleeve value / holdings / queued orders, any candidate sleeves, `report: reports/<date>.md` path, a stale-data WARNING if any), then `OK (exit 0). Log: <path>`;
+  - success: a header line, then the lines `trader daily` echoes (date and regime, momentum sleeve value / holdings / queued orders, any candidate sleeves, `report: trader show daily <date>` reference, a stale-data WARNING if any), then `OK (exit 0). Log: <path>`;
   - failure: `FAILED ...` plus the last 40 lines of the log.
 - The script uses nothing from Dhan MCP. Candles come from yfinance. Needs `uv` on PATH (`~/.local/bin` is added) and network access.
 
@@ -20,7 +20,7 @@ Paper trading only. Nothing in `src/` places orders, and `config.yaml` has `mode
 - Prompt: `.claude/commands/research.md` (frontmatter stripped, `$ARGUMENTS` = 1) plus `scripts/research_daily_prompt.md` (unattended overrides).
 - Guardrails: `research-promote` and `research-retire` are blocked in the tool allowlist, so any PASS or FORWARD_ONLY waits for the owner's approval. `evaluate.py` and `dsr.py` are checksummed before and after the run and restored from git if changed. The script refuses to start on a dirty repo.
 - Output: `reports/research/last_run.txt` (idea, verdict, deciding gate, trial count, promotion status, journal path) goes to Telegram. Changes are committed locally on success. Nothing is pushed.
-- Each run counts one trial in `data/research.db` (gitignored; local to this host). Trials are not shared across hosts. Every trial, pass or fail, raises the deflated-Sharpe bar for later ideas.
+- Each run counts one trial in the `trials` table in Postgres (shared by every host that uses the same database). Every trial, pass or fail, raises the deflated-Sharpe bar for later ideas.
 - Dry check without running Claude: `DRY_RUN=1 scripts/research_daily.sh`.
 
 ## Holiday lists
@@ -29,17 +29,17 @@ Both scripts read every `scripts/nse_holidays_<year>.txt` (one `YYYY-MM-DD` per 
 
 ## Moving to a new Hermes host
 
-1. Old host: `scripts/handoff_pack.sh [OUT_DIR] [--with-candles]` writes `trader-state-<stamp>.tar.gz` (consistent SQLite backups of `paper.db` and `research.db`, params, membership, fundamentals, `config.yaml`, git HEAD; no `.env`; candles only with the flag, otherwise `trader update` refetches them).
-Both `handoff_pack.sh` and `handoff_check.sh` run `scripts/trial_guard.sh`, which compares the counted trials in `data/research.db` with the newest trial number in the committed journals. A mismatch means the db is stale or from another host: the pack refuses (override with `--force`) and the check fails. Always pack from the host that runs the research job.
-2. New host: clone the repo (or copy it; `git log` has the research history), `tar -xzf <pack> -C <repo>`, install `uv` (and the `claude` CLI for the research job), then `scripts/handoff_check.sh` (add `--quick` to skip tests). It prints `READY` or lists failures.
+1. All state is in Postgres, so a new host needs no data copy. Old host: `scripts/handoff_pack.sh [OUT_DIR]` writes `trader-state-<stamp>.tar.gz` containing only `config.yaml` and the git HEAD (no `.env`).
+2. New host: clone the repo (`git log` has the research history), `tar -xzf <pack> -C <repo>`, create `.env` with the same `POSTGRES_HOST/PORT/USER/PASSWORD/DB` (see `.env.example`; copy it by hand, it is never packed), install `uv` (and the `claude` CLI for the research job), then `scripts/handoff_check.sh` (add `--quick` to skip tests). It checks the database is reachable and holds the paper ledger, then prints `READY` or lists failures.
 3. Create the two Hermes cron jobs (timezone Asia/Kolkata, Mon-Fri): `16:30` runs `scripts/trader_daily.sh`; `18:30` runs `scripts/research_daily.sh`. Stdout of each is the Telegram message; empty stdout sends nothing.
-4. Do not run `paper-momentum --reset` or `research-promote` on the new host: the ledger is a replay from frozen params in `paper.db`. Only one host should run the jobs, otherwise two ledgers and two trial counts diverge.
+4. Do not run `paper-momentum --reset` or `research-promote` on the new host: the ledger is a replay from frozen params in `paper_meta`. Ledger and research commands hold Postgres advisory locks, so two hosts cannot write at once, but only one host should run the scheduled jobs.
 5. `trader_daily.sh` now also runs `fundamentals-snapshot --if-stale-days 7` after the daily run, so Hermes keeps building the dated fundamentals history (previously only `/daily` under Claude did).
 
 ## Where things live
 
-- Reports: `reports/<date>.md`, `reports/<date>-momentum-orders.csv` (gitignored).
-- Ledgers: `data/paper.db` (paper sleeves), `data/research.db` (research trials). Also under `data/`: candles, membership, fundamentals. All of `data/` and `reports/` and `.env` are gitignored, so **they must be copied manually to a new host**. The paper ledger is a deterministic replay from frozen params, so `paper.db` plus `config.yaml` matter; do not reset it.
+- Everything is in Postgres (`POSTGRES_*` in the gitignored `.env`, which must be created by hand on a new host): candles, instruments, membership, fundamentals, the paper ledger (`paper_meta` + sleeve tables), research trials, generated outputs and `job_runs`. Read reports with `uv run trader show daily [date]`; `uv run trader db status` shows row counts. The paper ledger is a deterministic replay from frozen params, so `paper_meta` plus `config.yaml` matter; do not reset it.
+- The server has no TLS (plaintext connection as of 2026-11-18): credentials and data cross the network unencrypted. Prefer an SSH tunnel or `POSTGRES_SSLMODE=require` once the server supports TLS.
+- The pre-migration local files (`data/`, `reports/`) are an unused backup of the 2026-11-18 import and can be deleted once you are satisfied.
 - Nothing has been pushed; the repo has local history only (an `origin` remote is configured but unused).
 
 ## Claude-only (not part of the Hermes run)
