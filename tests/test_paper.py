@@ -5,7 +5,7 @@ import pytest
 
 from trader import backtest as bt
 from helpers import patch_candles
-from trader import paper
+from trader import outputs, paper
 from trader.config import Config
 from trader.data import store
 from trader.selector import Selector
@@ -14,15 +14,13 @@ from test_strategies_backtest import synth
 
 
 @pytest.fixture
-def world(monkeypatch, tmp_path):
+def world(monkeypatch, pg):
     frames = {f"S{i}": synth(600, seed=i) for i in range(8)}
     frames["NIFTY500"] = synth(600, seed=99, drift=0.0004)
     patch_candles(monkeypatch, frames)
-    monkeypatch.setattr(Config, "data_dir", property(lambda self: tmp_path))
     inst = pd.DataFrame({"symbol": [f"S{i}" for i in range(8)], "sector": list("AABBCCDD")})
-    (tmp_path / "params.json").write_text(json.dumps(
-        {n: {"key": f"{n}#0", "params": {}} for n in ALL}))
-    (tmp_path / "selector_stats.json").write_text(json.dumps({}))
+    outputs.save("walkforward", "", {"params": {n: {"key": f"{n}#0", "params": {}} for n in ALL},
+                                     "selector_stats": {}})
     return Config(capital=1_000_000), inst, frames["NIFTY500"].index
 
 
@@ -71,15 +69,15 @@ def test_sync_persists_and_init_refuses_overwrite(world):
     assert st.last_date == idx[450]
     con = paper._db(cfg)
     assert con.execute("SELECT COUNT(*) FROM equity").fetchone()[0] == len(st.result.equity)
-    assert json.loads(con.execute("SELECT value FROM meta WHERE key='last_date'").fetchone()[0]) == str(idx[450].date())
+    assert con.execute("SELECT value FROM paper_meta WHERE key='last_date'").fetchone()[0] == str(idx[450].date())
     con.close()
     paper.init(cfg, idx[300], reset=True)  # reset allowed
 
 
 def test_frozen_selector_is_used(world):
     cfg, inst, idx = world
-    (cfg.data_dir / "selector_stats.json").write_text(json.dumps(
-        {f"{n}|{r}": -1.0 for n in ALL for r in ("bear", "neutral", "bull")}))
+    outputs.save("walkforward", "", {"params": {n: {"key": f"{n}#0", "params": {}} for n in ALL},
+                                     "selector_stats": {f"{n}|{r}": -1.0 for n in ALL for r in ("bear", "neutral", "bull")}})
     paper.init(cfg, idx[300], reset=True)
     st = paper.sync(cfg, inst, asof=str(idx[450].date()))
     assert len(st.result.trades) == 0 and not st.result.pending  # every strategy switched off
@@ -122,7 +120,7 @@ def test_drop_swing_keeps_momentum(world):
     paper.sync(cfg, inst, asof=str(idx[450].date()))
     paper.drop_swing(cfg)
     con = paper._db(cfg)
-    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    tables = {r[0] for r in con.execute("SELECT tablename FROM pg_tables WHERE schemaname = current_schema()")}
     assert not tables & set(paper.SWING_TABLES) and {"mom_equity", "mom_positions"} <= tables
     assert set(paper._meta(con)) == {"momentum"}
     con.close()

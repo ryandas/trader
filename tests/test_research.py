@@ -85,13 +85,11 @@ def test_lookahead_guard_passes_honest_and_catches_leaky(monkeypatch):
 
 # ---------------------------------------------------------------- registry
 @pytest.fixture
-def lab(monkeypatch, tmp_path):
-    """Synthetic market + temp data dir + temp candidates dir + temp reports root."""
+def lab(monkeypatch, tmp_path, pg):
+    """Synthetic market + temp candidates dir; ledger, trials and outputs in the throwaway Postgres schema."""
     frames = {f"S{i}": synth(700, seed=i, drift=0.0005 + 0.0002 * (i % 5)) for i in range(30)}
     frames["NIFTY500"] = synth(700, seed=99, drift=0.0004)
     patch_candles(monkeypatch, frames)
-    monkeypatch.setattr(Config, "data_dir", property(lambda self: tmp_path))
-    monkeypatch.setattr(evaluate, "ROOT", tmp_path)
     monkeypatch.setattr(evaluate, "PIT", False)  # synthetic market has no membership snapshots; tests cover gate logic
     cdir = tmp_path / "cands"
     cdir.mkdir()
@@ -183,8 +181,7 @@ def test_promote_requires_passing_trial_then_sync_runs_sleeve_and_leaves_momentu
     st = paper.sync(cfg, inst, asof=str(idx[450].date()))
     assert "t_ok" in st.cands and not st.cand_errors
     pd.testing.assert_frame_equal(before.mom.result.equity, st.mom.result.equity)  # momentum sleeve untouched
-    import sqlite3
-    con = sqlite3.connect(cfg.data_dir / "paper.db")
+    con = paper._db(cfg)
     assert con.execute("select count(*) from cand_equity where sleeve='t_ok'").fetchone()[0] > 0
     assert con.execute("select count(*) from mom_equity").fetchone()[0] == len(before.mom.result.equity)
     con.close()

@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 
 from . import backtest as bt
+from . import outputs
 from .config import ROOT, Config
 from .metrics import summarize
 from .paper import MomState, PaperState
@@ -12,11 +13,11 @@ from .paper import MomState, PaperState
 
 def _evidence_line(cfg: Config) -> str:
     """One honest line on what the walk-forward showed, read from its saved output."""
-    eq_p, tr_p = ROOT / "reports/walkforward/oos_equity.csv", ROOT / "reports/walkforward/oos_trades.csv"
-    if not eq_p.exists():
+    wf = outputs.get("walkforward")
+    if not wf or "oos_equity" not in wf:
         return "No walk-forward evidence on file. Treat these signals as unvalidated."
-    eq = pd.read_csv(eq_p, index_col=0, parse_dates=True)
-    m = summarize(eq, pd.read_csv(tr_p) if tr_p.exists() else pd.DataFrame(), bt.load_benchmark(cfg))
+    tr = wf.get("oos_trades")
+    m = summarize(wf["oos_equity"], tr if tr is not None else pd.DataFrame(), bt.load_benchmark(cfg))
     verdict = "did NOT beat" if m["cagr_pct"] < m.get("benchmark_cagr_pct", -1e9) else "beat"
     return (
         f"Walk-forward out-of-sample ({m['start']} to {m['end']}): CAGR {m['cagr_pct']}% vs "
@@ -40,7 +41,7 @@ MOM_CAVEAT = (
 )
 
 
-def _momentum_section(cfg: Config, m: MomState, day, csv_path: Path) -> str:
+def _momentum_section(cfg: Config, m: MomState, day, orders_out: dict) -> str:
     r, prep = m.result, m.prep
     li = prep.dates.get_loc(m.last_date)
     eq = r.equity["equity"]
@@ -54,7 +55,7 @@ def _momentum_section(cfg: Config, m: MomState, day, csv_path: Path) -> str:
         [{"side": "SELL", "symbol": prep.syms[si], "reason": why, "approx_qty": "-"} for si, why in r.pending_sells.items()]
         + [{"side": "BUY", "symbol": prep.syms[si], "reason": "rebalance",
             "approx_qty": int(tv // float(prep.c[li, si]))} for si, tv in r.pending_buys])
-    orders.to_csv(csv_path, index=False)
+    orders_out["momentum-orders"] = orders
     nxt = (m.last_date + pd.offsets.BMonthEnd(0)).date()
     nxt_txt = ("orders above fill at the next open" if prep.rebal[li]
                else f"next rebalance signal: close of {nxt} (orders fill the following open)")
@@ -66,10 +67,10 @@ def _momentum_section(cfg: Config, m: MomState, day, csv_path: Path) -> str:
         perf = "\n".join(f"- {k}: {v}" for k, v in mt.items())
     else:
         perf = "_sleeve just started: no performance yet_"
-    wf_p = ROOT / "reports/momentum-wf/oos_equity.csv"
+    mwf = outputs.get("momentum-wf", "", "oos_equity")
     ev = ""
-    if wf_p.exists():
-        w = summarize(pd.read_csv(wf_p, index_col=0, parse_dates=True), pd.DataFrame(), bt.load_benchmark(cfg))
+    if mwf is not None:
+        w = summarize(mwf, pd.DataFrame(), bt.load_benchmark(cfg))
         ev = (f"Backtest walk-forward OOS ({w['start']} to {w['end']}): CAGR {w['cagr_pct']}% vs NIFTY 500 "
               f"{w.get('benchmark_cagr_pct', 'n/a')}%. ")
     return f"""
@@ -136,20 +137,23 @@ def _candidates_section(cfg: Config, st: PaperState) -> str:
     return f"\n---\n\n# Research candidate sleeves (paper)\n\n> **Paper only.** {CAND_CAVEAT}\n\n" + "\n".join(blocks)
 
 
-def _momentum_only_report(cfg: Config, st: PaperState) -> tuple[Path, Path]:
+def _ref(day, item: str = "") -> str:
+    return f"trader show daily {day}" + (f" {item}" if item else "")
+
+
+def _momentum_only_report(cfg: Config, st: PaperState) -> tuple[str, str]:
     day = st.last_date.date()
-    out = ROOT / "reports"
-    out.mkdir(exist_ok=True)
-    csv_path = out / f"{day}-momentum-orders.csv"
+    items: dict = {}
     warn = ("\n> **DATA MAY BE STALE** — latest bar is older than the last completed session. "
             "Run `trader update`.\n" if st.stale else "")
-    section = _momentum_section(cfg, st.mom, day, csv_path).replace("\n---\n\n", "\n", 1)
-    md_path = out / f"{day}.md"
-    md_path.write_text(f"# Paper trading report: {day}\n{warn}{section}{_candidates_section(cfg, st)}")
-    return md_path, csv_path
+    section = _momentum_section(cfg, st.mom, day, items).replace("\n---\n\n", "\n", 1)
+    items["report"] = f"# Paper trading report: {day}\n{warn}{section}{_candidates_section(cfg, st)}"
+    outputs.save("daily", str(day), items, {"stale": st.stale})
+    return _ref(day), _ref(day, "momentum-orders")
 
 
-def write_report(cfg: Config, st: PaperState) -> tuple[Path, Path]:
+def write_report(cfg: Config, st: PaperState) -> tuple[str, str]:
+    """Store the day's report (and order tables) in the database; returns `trader show` references."""
     if st.result is None:  # swing sleeve not in the ledger
         return _momentum_only_report(cfg, st)
     res, day = st.result, st.last_date.date()
@@ -185,7 +189,8 @@ def write_report(cfg: Config, st: PaperState) -> tuple[Path, Path]:
         perf = "_ledger just started: no performance yet_"
 
     warn = "\n> **DATA MAY BE STALE** — latest bar is older than the last completed session. Run `trader update`.\n" if st.stale else ""
-    mom_md = _momentum_section(cfg, st.mom, day, ROOT / "reports" / f"{day}-momentum-orders.csv") if st.mom else ""
+    items: dict = {"orders": orders}
+    mom_md = _momentum_section(cfg, st.mom, day, items) if st.mom else ""
     md = f"""# Paper trading report: {day}
 
 > **Paper only. Do not place real orders from this list.** {_evidence_line(cfg)}
@@ -205,9 +210,6 @@ def write_report(cfg: Config, st: PaperState) -> tuple[Path, Path]:
 
 _Universe is today's NIFTY 500 (survivorship bias in backtests; the paper ledger itself is forward-only from its start date)._
 {mom_md}{_candidates_section(cfg, st)}"""
-    out = ROOT / "reports"
-    out.mkdir(exist_ok=True)
-    md_path, csv_path = out / f"{day}.md", out / f"{day}-orders.csv"
-    md_path.write_text(md)
-    orders.to_csv(csv_path, index=False)
-    return md_path, csv_path
+    items["report"] = md
+    outputs.save("daily", str(day), items, {"stale": st.stale})
+    return _ref(day), _ref(day, "orders")

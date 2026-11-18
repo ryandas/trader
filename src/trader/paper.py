@@ -8,7 +8,6 @@ evidence. State is persisted to SQLite (data/paper.db) for reporting and for Cla
 from __future__ import annotations
 
 import json
-import sqlite3
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 
@@ -18,6 +17,7 @@ import pandas as pd
 from . import backtest as bt
 from . import momentum as mom
 from . import sessions
+from . import db, outputs
 from .config import Config
 from .data import store
 from .regime import NAMES
@@ -55,29 +55,28 @@ class PaperState:
     cand_errors: dict = field(default_factory=dict)  # slug -> reason the sleeve was not replayed
 
 
-def _db(cfg: Config) -> sqlite3.Connection:
-    cfg.data_dir.mkdir(parents=True, exist_ok=True)
-    return sqlite3.connect(cfg.data_dir / "paper.db")
+def _db(cfg: Config) -> db.Con:
+    return db.connect()
 
 
-def _meta(con: sqlite3.Connection) -> dict:
-    try:
-        rows = con.execute("SELECT key, value FROM meta").fetchall()
-    except sqlite3.OperationalError:
-        return {}
-    return {k: json.loads(v) for k, v in rows}
+def _meta(con: db.Con) -> dict:
+    return {k: v for k, v in con.execute("SELECT key, value FROM paper_meta").fetchall()}
+
+
+def _put_meta(con: db.Con, key: str, value) -> None:
+    con.execute("INSERT INTO paper_meta (key, value) VALUES (?, CAST(? AS jsonb)) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (key, json.dumps(value, default=str)))
 
 
 SWING_TABLES = ("trades", "equity", "positions", "orders")
 SWING_KEYS = ("start", "capital", "params", "selector", "created", "last_date", "regime")
-META_DDL = "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)"
 
 
-def _drop_swing(con: sqlite3.Connection) -> None:
-    con.execute(META_DDL)
+def _drop_swing(con: db.Con) -> None:
     for t in SWING_TABLES:
         con.execute(f"DROP TABLE IF EXISTS {t}")
-    con.executemany("DELETE FROM meta WHERE key = ?", [(k,) for k in SWING_KEYS])
+    for k in SWING_KEYS:
+        con.execute("DELETE FROM paper_meta WHERE key = ?", (k,))
 
 
 def drop_swing(cfg: Config) -> None:
@@ -90,22 +89,23 @@ def drop_swing(cfg: Config) -> None:
 
 def init(cfg: Config, start: pd.Timestamp, reset: bool = False) -> dict:
     """Freeze the fitted parameters and selector stats and start the swing sleeve at `start`."""
-    params_p, sel_p = cfg.data_dir / "params.json", cfg.data_dir / "selector_stats.json"
-    if not params_p.exists() or not sel_p.exists():
-        raise SystemExit("Run `trader walkforward` first: it writes the params/selector to freeze.")
+    params, sel = outputs.get("walkforward", "", "params"), outputs.get("walkforward", "", "selector_stats")
+    if params is None or sel is None:
+        raise SystemExit("Run `trader walkforward` first: it stores the params/selector to freeze.")
     con = _db(cfg)
     if "params" in _meta(con) and not reset:
         raise SystemExit("A swing ledger already exists. Use --reset to discard it and start over.")
     meta = {
         "start": str(start.date()),
         "capital": cfg.capital,
-        "params": json.loads(params_p.read_text()),
-        "selector": json.loads(sel_p.read_text()),
+        "params": params,
+        "selector": sel,
         "created": datetime.now().isoformat(timespec="seconds"),
     }
     with con:
         _drop_swing(con)  # momentum tables and meta are left alone
-        con.executemany("INSERT INTO meta VALUES (?, ?)", [(k, json.dumps(v)) for k, v in meta.items()])
+        for k, v in meta.items():
+            _put_meta(con, k, v)
     con.close()
     return meta
 
@@ -122,8 +122,6 @@ def init_momentum(
 
 
 def _init_momentum(con, cfg, start, params, liquid_top, reset) -> dict:
-    with con:
-        con.execute(META_DDL)
     meta = _meta(con)
     if "momentum" in meta and not reset:
         raise SystemExit("A momentum sleeve already exists. Use --reset to discard it and start over.")
@@ -132,7 +130,7 @@ def _init_momentum(con, cfg, start, params, liquid_top, reset) -> dict:
     with con:
         for t in ("mom_trades", "mom_equity", "mom_positions", "mom_orders"):
             con.execute(f"DROP TABLE IF EXISTS {t}")
-        con.execute("INSERT OR REPLACE INTO meta VALUES ('momentum', ?)", (json.dumps(mm),))
+        _put_meta(con, "momentum", mm)
     con.close()
     return mm
 
@@ -170,10 +168,10 @@ def _sync_momentum(cfg: Config, instruments: pd.DataFrame, meta: dict, asof: str
     res = state.result
     trades = res.trades if len(res.trades) else pd.DataFrame(columns=["symbol", "net_pnl"])
     with con:
-        trades.to_sql("mom_trades", con, if_exists="replace", index=False)
-        res.equity.reset_index().to_sql("mom_equity", con, if_exists="replace", index=False)
-        pos.to_sql("mom_positions", con, if_exists="replace", index=False)
-        orders.to_sql("mom_orders", con, if_exists="replace", index=False)
+        con.to_sql(trades, "mom_trades")
+        con.to_sql(res.equity.reset_index(), "mom_equity")
+        con.to_sql(pos, "mom_positions")
+        con.to_sql(orders, "mom_orders")
     return state
 
 
@@ -213,8 +211,6 @@ def _promote(con, cfg, slug, m, sha, trial, start) -> dict:
     from .data.sources import BENCHMARK
     from .research import evaluate as ev
 
-    with con:
-        con.execute(META_DDL)
     meta = _meta(con)
     cands = meta.get("candidates", {})
     if cands.get(slug, {}).get("active"):
@@ -236,7 +232,7 @@ def _promote(con, cfg, slug, m, sha, trial, start) -> dict:
     }
     cands[slug] = entry
     with con:
-        con.execute("INSERT OR REPLACE INTO meta VALUES ('candidates', ?)", (json.dumps(cands),))
+        _put_meta(con, "candidates", cands)
     con.close()
     return entry
 
@@ -250,15 +246,13 @@ def retire_candidate(cfg: Config, slug: str) -> None:
 
 
 def _retire(con, slug) -> None:
-    with con:
-        con.execute(META_DDL)
     cands = _meta(con).get("candidates", {})
     if slug not in cands or not cands[slug].get("active"):
         con.close()
         raise SystemExit(f"{slug} is not an active candidate sleeve.")
     cands[slug].update(active=False, retired=datetime.now().isoformat(timespec="seconds"))
     with con:
-        con.execute("INSERT OR REPLACE INTO meta VALUES ('candidates', ?)", (json.dumps(cands),))
+        _put_meta(con, "candidates", cands)
     con.close()
 
 
@@ -294,7 +288,7 @@ def _sync_candidates(cfg: Config, instruments: pd.DataFrame, meta: dict, asof: s
     with con:
         for name, parts in frames.items():
             df = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame({"sleeve": []})
-            df.to_sql(name, con, if_exists="replace", index=False)
+            con.to_sql(df, name)
     return states, errors
 
 
@@ -345,12 +339,12 @@ def _sync(con, cfg, instruments, asof) -> PaperState:
         positions = pd.DataFrame([asdict(p) for p in res.positions], columns=[f.name for f in fields(bt.Position)])
         trades = res.trades if len(res.trades) else pd.DataFrame(columns=["symbol", "strategy", "net_pnl"])
         with con:
-            trades.to_sql("trades", con, if_exists="replace", index=False)
-            res.equity.reset_index().to_sql("equity", con, if_exists="replace", index=False)
-            positions.to_sql("positions", con, if_exists="replace", index=False)
-            orders.to_sql("orders", con, if_exists="replace", index=False)
+            con.to_sql(trades, "trades")
+            con.to_sql(res.equity.reset_index(), "equity")
+            con.to_sql(positions, "positions")
+            con.to_sql(orders, "orders")
             for k, v in (("last_date", str(last.date())), ("regime", regime)):
-                con.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (k, json.dumps(v)))
+                _put_meta(con, k, v)
     mstate = _sync_momentum(cfg, instruments, meta, asof, con)
     cands, cand_errors = _sync_candidates(cfg, instruments, meta, asof, con)
     con.close()

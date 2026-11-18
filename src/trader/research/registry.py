@@ -1,4 +1,4 @@
-"""Candidate loading and the append-only trial registry (data/research.db).
+"""Candidate loading and the append-only trial registry (table `trials` in Postgres).
 
 Every evaluation is a row in `trials`; nothing is ever updated or deleted. The deflated Sharpe's
 trial count comes from here, so a researcher cannot hide failed attempts.
@@ -16,19 +16,18 @@ import hashlib
 import importlib
 import json
 import re
-import sqlite3
 from datetime import datetime
 from pathlib import Path
 
+from sqlalchemy import text
+
+from .. import db
 from ..config import Config
 
 SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{1,40}$")
 CANDIDATES_DIR = Path(__file__).parent / "candidates"
 ENGINE_KEYS = ("top_n", "buffer", "bear_exit", "rebalance")
 MAX_GRID = 4
-DDL = """CREATE TABLE IF NOT EXISTS trials (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, slug TEXT, file_sha256 TEXT, hypothesis TEXT,
-    source TEXT, grid TEXT, metrics_json TEXT, gates_json TEXT, verdict TEXT, counted INTEGER)"""
 
 
 def check_slug(slug: str) -> str:
@@ -81,63 +80,45 @@ def split_params(point: dict) -> tuple[dict, tuple]:
     return eng, rp
 
 
-# ---------------------------------------------------------------- trial log
-def _con(cfg: Config) -> sqlite3.Connection:
-    cfg.data_dir.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(cfg.data_dir / "research.db")
-    con.execute(DDL)
-    return con
-
-
+# ---------------------------------------------------------------- trial log (table `trials`, append-only by trigger)
 def record_trial(cfg: Config, slug: str, sha: str, m: dict, metrics: dict, gates: dict, verdict: str,
                  counted: bool = True) -> int:
-    con = _con(cfg)
-    with con:
-        cur = con.execute(
+    with db.engine().begin() as c:
+        return int(c.execute(text(
             "INSERT INTO trials (ts, slug, file_sha256, hypothesis, source, grid, metrics_json, gates_json, verdict, counted)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (datetime.now().isoformat(timespec="seconds"), slug, sha, m["hypothesis"], m["source"],
-             json.dumps(m["grid"]), json.dumps(metrics, default=float), json.dumps(gates, default=str), verdict, int(counted)),
-        )
-    con.close()
-    return int(cur.lastrowid)
+            " VALUES (:ts, :slug, :sha, :hyp, :src, CAST(:grid AS jsonb), CAST(:met AS jsonb), CAST(:gat AS jsonb), :v, :n)"
+            " RETURNING id"),
+            {"ts": datetime.now().isoformat(timespec="seconds"), "slug": slug, "sha": sha, "hyp": m["hypothesis"],
+             "src": m["source"], "grid": json.dumps(m["grid"]), "met": json.dumps(metrics, default=float),
+             "gat": json.dumps(gates, default=str), "v": verdict, "n": int(counted)}).scalar())
 
 
 def trial_count(cfg: Config) -> int:
-    con = _con(cfg)
-    n = con.execute("SELECT COUNT(*) FROM trials WHERE counted = 1").fetchone()[0]
-    con.close()
-    return int(n)
+    with db.engine().connect() as c:
+        return int(c.execute(text("SELECT COUNT(*) FROM trials WHERE counted = 1")).scalar())
 
 
 def trial_sharpes(cfg: Config) -> list[float]:
     """Per-period (daily) Sharpe of every counted trial that recorded one."""
-    con = _con(cfg)
-    rows = con.execute("SELECT metrics_json FROM trials WHERE counted = 1").fetchall()
-    con.close()
-    out = []
-    for (mj,) in rows:
-        v = json.loads(mj).get("daily_sharpe")
-        if v is not None:
-            out.append(float(v))
-    return out
+    with db.engine().connect() as c:
+        rows = c.execute(text("SELECT metrics_json FROM trials WHERE counted = 1 ORDER BY id")).fetchall()
+    return [float(mj["daily_sharpe"]) for (mj,) in rows if mj.get("daily_sharpe") is not None]
 
 
 def latest_trial(cfg: Config, slug: str, sha: str | None = None) -> dict | None:
-    con = _con(cfg)
-    q, args = "SELECT id, ts, file_sha256, metrics_json, gates_json, verdict FROM trials WHERE slug = ?", [slug]
+    q = "SELECT id, ts, file_sha256, metrics_json, gates_json, verdict FROM trials WHERE slug = :slug"
+    args = {"slug": slug}
     if sha:
-        q, args = q + " AND file_sha256 = ?", args + [sha]
-    row = con.execute(q + " ORDER BY id DESC LIMIT 1", args).fetchone()
-    con.close()
+        q, args["sha"] = q + " AND file_sha256 = :sha", sha
+    with db.engine().connect() as c:
+        row = c.execute(text(q + " ORDER BY id DESC LIMIT 1"), args).fetchone()
     if not row:
         return None
-    return {"id": row[0], "ts": row[1], "sha": row[2], "metrics": json.loads(row[3]),
-            "gates": json.loads(row[4]), "verdict": row[5]}
+    return {"id": row[0], "ts": row[1], "sha": row[2], "metrics": row[3], "gates": row[4], "verdict": row[5]}
 
 
 def recent_trials(cfg: Config, limit: int = 10) -> list[dict]:
-    con = _con(cfg)
-    rows = con.execute("SELECT id, ts, slug, verdict, counted FROM trials ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-    con.close()
+    with db.engine().connect() as c:
+        rows = c.execute(text("SELECT id, ts, slug, verdict, counted FROM trials ORDER BY id DESC LIMIT :n"),
+                         {"n": limit}).fetchall()
     return [{"id": r[0], "ts": r[1], "slug": r[2], "verdict": r[3], "counted": bool(r[4])} for r in rows]

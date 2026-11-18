@@ -146,3 +146,44 @@ def copy_df(sql: str) -> pd.DataFrame:
 
 def jdump(v) -> str:
     return json.dumps(v, default=str)
+
+
+class Con:
+    """Small transactional wrapper over a SQLAlchemy connection.
+
+    `with con:` is a transaction (commit on success, rollback on error) that does NOT close the connection; `close()` does.
+    SQL may use `?` placeholders. Used by the ledger, which writes several tables atomically."""
+
+    def __init__(self) -> None:
+        self.sa = engine().connect()
+
+    def __enter__(self) -> "Con":
+        if not self.sa.in_transaction():
+            self.sa.begin()  # explicit, so pandas.to_sql joins it instead of committing on its own
+        return self
+
+    def __exit__(self, et, ev, tb) -> None:
+        self.sa.commit() if et is None else self.sa.rollback()  # also ends a transaction auto-begun by an earlier read
+
+    @staticmethod
+    def _bind(sql: str, params) -> tuple:
+        i = iter(range(len(params)))
+        out = "".join(f":p{next(i)}" if ch == "?" else ch for ch in sql)
+        return text(out), {f"p{k}": v for k, v in enumerate(params)}
+
+    def execute(self, sql: str, params=()):
+        stmt, p = self._bind(sql, params)
+        return self.sa.execute(stmt, p)
+
+    def to_sql(self, df: pd.DataFrame, name: str) -> None:
+        """Replace table `name` with `df` (inside the current transaction)."""
+        df.to_sql(name, self.sa, if_exists="replace", index=False)
+
+    def close(self) -> None:
+        if self.sa.in_transaction():
+            self.sa.rollback()
+        self.sa.close()
+
+
+def connect() -> Con:
+    return Con()

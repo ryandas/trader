@@ -17,8 +17,9 @@ import pandas as pd
 
 from .. import backtest as bt
 from .. import momentum as mom
+from .. import outputs
 from .. import walkforward as wf
-from ..config import ROOT, Config
+from ..config import Config
 from ..data import fundamentals
 from ..metrics import summarize
 from . import dsr, registry
@@ -128,9 +129,10 @@ def _active_candidate_curves(cfg: Config, exclude: str) -> dict[str, pd.Series]:
 
     out = {}
     for slug, e in paper.candidate_entries(cfg).items():
-        pth = ROOT / "reports" / "research" / slug / "oos_equity.csv"
-        if slug != exclude and e.get("active", True) and pth.exists():
-            out[slug] = pd.read_csv(pth, index_col=0, parse_dates=True)["equity"]
+        if slug != exclude and e.get("active", True):
+            curve = outputs.get("research-eval", slug, "oos_equity")
+            if curve is not None:
+                out[slug] = curve["equity"]
     return out
 
 
@@ -282,11 +284,7 @@ def evaluate(cfg: Config, instruments: pd.DataFrame, slug: str, record: bool = T
     gi = int(folds["grid_index"].iloc[-1])  # grid point chosen on the most recent in-sample window
     res.chosen_params = {"grid_index": gi, "point": m["grid"][gi], "label": params[gi].label()}
     res.verdict = "PASS" if all(g["ok"] for g in gates.values()) else "FAIL"
-    out = ROOT / "reports" / "research" / slug
-    out.mkdir(parents=True, exist_ok=True)
-    folds.to_csv(out / "folds.csv", index=False)
-    eq.to_csv(out / "oos_equity.csv")
-    return _finish(cfg, res, m, sha, record, counted, "", folds=folds)
+    return _finish(cfg, res, m, sha, record, counted, "", folds=folds, eq=eq)
 
 
 def _forward_only(cfg, ecfg, prep, p, res: EvalResult, m: dict, sha: str, record: bool, counted: bool) -> EvalResult:
@@ -321,11 +319,14 @@ def _forward_only(cfg, ecfg, prep, p, res: EvalResult, m: dict, sha: str, record
 
 
 def _finish(cfg: Config, res: EvalResult, m: dict, sha: str, record: bool, counted: bool, note: str,
-            folds: pd.DataFrame | None = None) -> EvalResult:
+            folds: pd.DataFrame | None = None, eq: pd.DataFrame | None = None) -> EvalResult:
     res.summary_md = render_summary(res, m, note, folds)
-    out = ROOT / "reports" / "research" / res.slug
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "summary.md").write_text(res.summary_md)
+    items: dict = {"summary": res.summary_md}
+    if folds is not None:
+        items["folds"] = folds
+    if eq is not None:
+        items["oos_equity"] = eq
+    outputs.save("research-eval", res.slug, items, {"verdict": res.verdict, "recorded": record, "counted": counted})
     if record:
         tid = registry.record_trial(cfg, res.slug, sha, m, {**res.metrics, "chosen": res.chosen_params, "note": note},
                                     {k: v for k, v in res.gates.items()}, res.verdict, counted)

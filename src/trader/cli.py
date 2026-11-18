@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import functools
+
 import typer
 
+from . import db, outputs
 from .config import dhan_credentials, load_config
 from .data.sources import BENCHMARK, DhanSource, YFinanceSource
 from .data import instruments as inst
@@ -9,6 +12,17 @@ from .data import store
 from .data.dhan import DhanAuthError, DhanClient
 
 app = typer.Typer(no_args_is_help=True, help="Systematic daily swing trader (NIFTY 500 / Dhan)")
+
+
+def locked(name: str):
+    """Run the command under a Postgres advisory lock so two hosts cannot write the same state at once."""
+    def deco(fn):
+        @functools.wraps(fn)
+        def inner(*a, **k):
+            with db.lock(name):
+                return fn(*a, **k)
+        return inner
+    return deco
 
 
 @app.command()
@@ -68,7 +82,6 @@ def backtest(
     strategy: str = typer.Option("all", help="all, or one of: trend_pullback, breakout, mean_reversion"),
     from_: str = typer.Option("2022-01-01", "--from", help="Backtest start date"),
     to: str = typer.Option(None, help="Backtest end date (default: last bar)"),
-    out: str = typer.Option("reports/backtest", help="Output directory for trades/equity CSVs"),
     filters: bool = typer.Option(True, help="Top-N universe + regime/selector rules (off = step-3 baseline)"),
 ) -> None:
     """Run the portfolio backtest over stored daily candles."""
@@ -87,10 +100,8 @@ def backtest(
     strats = {n: ALL[n]() for n in names}
     prep = bt.prepare(cfg, inst.load_instruments(), list(strats.values()), filters)
     res = bt.run(cfg, prep, strats, pd.Timestamp(from_), pd.Timestamp(to) if to else None)
-    outdir = ROOT / out
-    outdir.mkdir(parents=True, exist_ok=True)
-    res.trades.to_csv(outdir / "trades.csv", index=False)
-    res.equity.to_csv(outdir / "equity.csv")
+    outputs.save("backtest", "", {"trades": res.trades, "equity": res.equity},
+                 {"strategy": strategy, "from": from_, "to": to, "filters": filters})
     m = summarize(res.equity, res.trades, bt.load_benchmark(cfg))
     typer.echo(json.dumps(m, indent=2))
     if len(res.trades):
@@ -103,9 +114,7 @@ def backtest(
 
 
 @app.command()
-def walkforward(
-    out: str = typer.Option("reports/walkforward", help="Output directory"),
-) -> None:
+def walkforward() -> None:
     """Rolling walk-forward (3y in-sample / 1y out-of-sample); saves fitted params and selector."""
     import json
 
@@ -121,11 +130,6 @@ def walkforward(
     base_prep = bt.prepare(cfg, instruments, [g for k, g in grid.items() if k.endswith("#0")], filters=False)
     res = wf.walk_forward(cfg, prep, base_prep, grid)
     bench = bt.load_benchmark(cfg)
-    outdir = ROOT / out
-    outdir.mkdir(parents=True, exist_ok=True)
-    res.folds.to_csv(outdir / "folds.csv", index=False)
-    res.trades.to_csv(outdir / "oos_trades.csv", index=False)
-    res.equity.to_csv(outdir / "oos_equity.csv")
     for label, eq, tr in (("WALK-FORWARD (out-of-sample)", res.equity, res.trades),
                           ("BASELINE (no filters, default params)", res.baseline_equity, res.baseline_trades)):
         typer.echo(f"\n== {label} ==")
@@ -140,14 +144,16 @@ def walkforward(
     # Final fit on the most recent 3 years: parameters + selector used for live/paper trading.
     last = prep.dates[-1]
     chosen, sel, _ = wf.fit(cfg, prep, grid, last - __import__("pandas").DateOffset(years=3), last)
-    (cfg.data_dir / "params.json").write_text(json.dumps(
-        {n: {"key": k, "params": grid[k].params} for n, k in chosen.items()}, indent=2))
-    sel.save(cfg.data_dir / "selector_stats.json")
-    typer.echo(f"\nFitted on last 3y -> {cfg.data_dir / 'params.json'}, selector_stats.json")
+    outputs.save("walkforward", "", {
+        "folds": res.folds, "oos_trades": res.trades, "oos_equity": res.equity,
+        "params": {n: {"key": k, "params": grid[k].params} for n, k in chosen.items()},
+        "selector_stats": sel.to_dict()})
+    typer.echo("\nFitted on last 3y -> stored in the database (params, selector_stats)")
     typer.echo("Caveat: universe = today's NIFTY 500 constituents (survivorship bias).")
 
 
 @app.command("paper-init")
+@locked("ledger")
 def paper_init(
     start: str = typer.Option(None, help="Ledger start date (default: latest bar, i.e. forward-only)"),
     reset: bool = typer.Option(False, help="Discard an existing ledger and start over"),
@@ -168,6 +174,7 @@ def paper_init(
 
 
 @app.command("paper-drop-swing")
+@locked("ledger")
 def paper_drop_swing() -> None:
     """Remove the swing sleeve from the paper ledger (the momentum sleeve is kept)."""
     from . import paper
@@ -177,6 +184,7 @@ def paper_drop_swing() -> None:
 
 
 @app.command("paper-momentum")
+@locked("ledger")
 def paper_momentum(
     start: str = typer.Option(None, help="Sleeve start date (default: latest bar, i.e. forward-only)"),
     liquid_top: int = typer.Option(None, help="Only the N most liquid names each day"),
@@ -200,6 +208,7 @@ def paper_momentum(
 
 
 @app.command()
+@locked("ledger")
 def daily(
     asof: str = typer.Option(None, help="Simulate running on this date (uses data up to it)"),
     no_update: bool = typer.Option(False, help="Skip the data refresh"),
@@ -212,7 +221,7 @@ def daily(
     if not no_update and asof is None:
         update(None, "yfinance")  # refresh the whole universe + benchmark
     st = paper.sync(cfg, instruments, asof)
-    md, csv = report.write_report(cfg, st)
+    md, csv = report.write_report(cfg, st)  # references like "trader show daily <date>"
     if st.result is not None:
         r = st.result
         typer.echo(
@@ -251,7 +260,6 @@ def momentum(
     lookback: int = typer.Option(None), skip: int = typer.Option(None),
     top_n: int = typer.Option(None), buffer: int = typer.Option(None),
     bear_exit: bool = typer.Option(None, help="Sell everything when the market turns bearish"),
-    out: str = typer.Option("reports/momentum", help="Output directory"),
     liquid_top: int = typer.Option(None, help="Only the N most liquid names each day (survivorship guard)"),
     pit: bool = typer.Option(False, help="Point-in-time universe: only stocks that were in the NIFTY 500 on each day (data/membership)"),
 ) -> None:
@@ -272,10 +280,8 @@ def momentum(
     )
     prep = mom.prepare(cfg, inst.load_instruments(), liquid_top, pit)
     res = mom.run(cfg, prep, p, pd.Timestamp(from_), pd.Timestamp(to) if to else None)
-    outdir = ROOT / out
-    outdir.mkdir(parents=True, exist_ok=True)
-    res.trades.to_csv(outdir / "trades.csv", index=False)
-    res.equity.to_csv(outdir / "equity.csv")
+    outputs.save("momentum", "", {"trades": res.trades, "equity": res.equity},
+                 {"params": p.label(), "from": from_, "to": to, "liquid_top": liquid_top, "pit": pit})
     typer.echo(p.label())
     typer.echo(json.dumps(mom.summarize(res.equity, res.trades, bt.load_benchmark(cfg)), indent=2))
     typer.echo(f"turnover per year: {res.turnover_per_year:.2f}x equity")
@@ -285,7 +291,6 @@ def momentum(
 
 @app.command("momentum-wf")
 def momentum_wf(
-    out: str = typer.Option("reports/momentum-wf", help="Output directory"),
     liquid_top: int = typer.Option(None, help="Only the N most liquid names each day (survivorship guard)"),
     pit: bool = typer.Option(False, help="Point-in-time universe: only stocks that were in the NIFTY 500 on each day (data/membership)"),
 ) -> None:
@@ -302,12 +307,9 @@ def momentum_wf(
     prep = mom.prepare(cfg, inst.load_instruments(), liquid_top, pit)
     res = mom.walk_forward(cfg, prep)
     bench = bt.load_benchmark(cfg)
-    outdir = ROOT / out
-    outdir.mkdir(parents=True, exist_ok=True)
     folds = pd.DataFrame(res["folds"])
-    folds.to_csv(outdir / "folds.csv", index=False)
-    res["equity"].to_csv(outdir / "oos_equity.csv")
-    res["trades"].to_csv(outdir / "oos_trades.csv", index=False)
+    outputs.save("momentum-wf", "", {"folds": folds, "oos_equity": res["equity"], "oos_trades": res["trades"]},
+                 {"liquid_top": liquid_top, "pit": pit})
     typer.echo(folds.to_string(index=False))
     typer.echo("\n== MOMENTUM WALK-FORWARD (out-of-sample, params chosen in-sample) ==")
     typer.echo(json.dumps(mom.summarize(res["equity"], res["trades"], bench), indent=2))
@@ -361,6 +363,7 @@ def fundamentals_snapshot(
 
 
 @app.command("research-eval")
+@locked("research")
 def research_eval(
     slug: str = typer.Argument(..., help="Candidate in src/trader/research/candidates/<slug>.py"),
     recheck: bool = typer.Option(False, help="Informational re-run of an earlier candidate: not counted as a new trial"),
@@ -371,12 +374,13 @@ def research_eval(
     cfg = load_config()
     res = evaluate.evaluate(cfg, inst.load_instruments(), slug, record=True, counted=not recheck)
     typer.echo(res.summary_md)
-    typer.echo(f"VERDICT: {res.verdict}  (reports/research/{slug}/summary.md)")
+    typer.echo(f"VERDICT: {res.verdict}  (trader show research-eval {slug} summary)")
     if res.verdict in ("PASS", "FORWARD_ONLY"):
         typer.echo(f"Next: `trader research-promote {slug}` starts a forward paper sleeve (paper only).")
 
 
 @app.command("research-promote")
+@locked("ledger")
 def research_promote(slug: str = typer.Argument(...)) -> None:
     """Freeze a candidate that passed research-eval into the paper ledger as its own forward-only sleeve."""
     from . import paper
@@ -388,6 +392,7 @@ def research_promote(slug: str = typer.Argument(...)) -> None:
 
 
 @app.command("research-retire")
+@locked("ledger")
 def research_retire(slug: str = typer.Argument(...)) -> None:
     """Stop replaying a candidate sleeve (its trials stay in the registry)."""
     from . import paper
@@ -440,3 +445,90 @@ def market_context_cmd() -> None:
 
 if __name__ == "__main__":
     app()
+
+
+@app.command()
+def show(
+    kind: str = typer.Argument(..., help="daily, walkforward, momentum, momentum-wf, backtest, research-eval"),
+    key: str = typer.Argument(None, help="daily: date; research-eval: slug (default: newest run of the kind)"),
+    item: str = typer.Argument(None, help="item name (default: report/summary, or a list of the run's items)"),
+    run_id: int = typer.Option(None, "--run", help="a specific run id instead of the newest"),
+) -> None:
+    """Print a stored report or result from the database."""
+    from sqlalchemy import text
+
+    rid = run_id
+    if rid is None:
+        q = "SELECT id FROM output_runs WHERE kind = :k" + (" AND key = :y" if key else "") + " ORDER BY id DESC LIMIT 1"
+        with db.engine().connect() as c:
+            rid = c.execute(text(q), {"k": kind, **({"y": key} if key else {})}).scalar()
+    if rid is None:
+        raise SystemExit(f"No stored output for {kind}{' ' + key if key else ''}.")
+    items = outputs.get(kind, key or "", run_id=rid)
+    if item is None:
+        item = "report" if "report" in items else "summary" if "summary" in items else None
+    if item is None:
+        typer.echo(f"run {rid}: items = {', '.join(items)}")
+        return
+    if item not in items:
+        raise SystemExit(f"run {rid} has no item {item!r}; items: {', '.join(items)}")
+    typer.echo(outputs.render(items[item]))
+
+
+db_app = typer.Typer(no_args_is_help=True, help="Database utilities")
+app.add_typer(db_app, name="db")
+
+
+@db_app.command("status")
+def db_status() -> None:
+    """Connection check, row counts and latest dates."""
+    from sqlalchemy import text
+
+    from . import migrate
+
+    with db.engine().connect() as c:
+        typer.echo(f"connected: {c.execute(text('select version()')).scalar().split(',')[0]} | schema {db.schema()}")
+        last_c = c.execute(text("SELECT MAX(date) FROM candles")).scalar()
+        last_f = c.execute(text("SELECT MAX(snap_date) FROM fundamentals")).scalar()
+        job = c.execute(text("SELECT job, finished, exit_code FROM job_runs ORDER BY id DESC LIMIT 1")).fetchone()
+    for t, n in migrate.counts().items():
+        typer.echo(f"  {t:24s}{n:>10,}")
+    typer.echo(f"latest candle {last_c} | latest fundamentals snapshot {last_f} | last job: {tuple(job) if job else 'none'}")
+
+
+@db_app.command("trial-count")
+def db_trial_count() -> None:
+    """Number of counted research trials (used by scripts/trial_guard.sh)."""
+    from .research import registry
+
+    typer.echo(registry.trial_count(load_config()))
+
+
+@db_app.command("log-run")
+def db_log_run(
+    job: str = typer.Option(..., help="daily or research"),
+    exit_code: int = typer.Option(..., "--exit"),
+    message_file: str = typer.Option(None, help="file holding the message sent to the user"),
+    log_file: str = typer.Option(None, help="file holding the full log"),
+    started: str = typer.Option(None, help="ISO start time"),
+) -> None:
+    """Record a script run (message and log) in `job_runs`."""
+    from pathlib import Path
+
+    from sqlalchemy import text
+
+    rd = lambda f: Path(f).read_text(errors="replace") if f and Path(f).exists() else None  # noqa: E731
+    with db.engine().begin() as c:
+        c.execute(text("INSERT INTO job_runs (job, started, exit_code, message, log) VALUES (:j, CAST(:s AS timestamptz), :e, :m, :l)"),
+                  {"j": job, "s": started, "e": exit_code, "m": rd(message_file), "l": rd(log_file)})
+    typer.echo(f"logged {job} run (exit {exit_code})")
+
+
+@db_app.command("migrate-local")
+def db_migrate_local(force: bool = typer.Option(False, help="Replace data already in the database")) -> None:
+    """One-off import of data/ and reports/ (local files stay as a backup); verifies row counts."""
+    from . import migrate
+
+    if not migrate.run(force, typer.echo):
+        raise SystemExit("Row counts do not match the sources (see above).")
+    typer.echo("migration verified")
