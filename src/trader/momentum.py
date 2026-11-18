@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from . import sessions
 from . import walkforward as wf
 from .config import Config
 from .costs import apply_slippage, trade_costs
@@ -173,7 +174,7 @@ def prepare(cfg: Config, instruments: pd.DataFrame, liquid_top: int | None = Non
     month = dates.to_period("M")
     rebal = np.zeros(len(dates), dtype=bool)
     rebal[:-1] = month[:-1] != month[1:]
-    nxt = dates[-1] + pd.offsets.BDay(1)  # last bar: is the next business day in a new month?
+    nxt = sessions.next_session(dates[-1])  # last bar: is the next NSE session (holidays skipped) in a new month?
     rebal[-1] = nxt.to_period("M") != month[-1]
     week = dates.to_period("W")
     rebal_w = np.zeros(len(dates), dtype=bool)

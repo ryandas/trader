@@ -17,6 +17,7 @@ import pandas as pd
 
 from . import backtest as bt
 from . import momentum as mom
+from . import sessions
 from .config import Config
 from .data import store
 from .regime import NAMES
@@ -282,6 +283,11 @@ def strategies_from(params: dict) -> dict[str, Strategy]:
     return out
 
 
+def is_stale(last_bar, last_complete_day) -> bool:
+    """True when the newest bar is older than the last session that should already have a final bar."""
+    return pd.Timestamp(last_bar).date() < sessions.last_session_on_or_before(last_complete_day)
+
+
 def sync(cfg: Config, instruments: pd.DataFrame, asof: str | None = None) -> PaperState:
     """Replay each sleeve from its start to `asof` (default: latest bar) and persist the state."""
     con = _db(cfg)
@@ -320,5 +326,5 @@ def sync(cfg: Config, instruments: pd.DataFrame, asof: str | None = None) -> Pap
     if last is None:  # momentum-only ledger
         last = mstate.last_date
         regime = NAMES[int(mstate.prep.mkt[mstate.prep.dates.get_loc(last)])]
-    stale = asof is None and np.busday_count(last.date(), store.last_complete_day()) > 1
+    stale = asof is None and is_stale(last, store.last_complete_day())
     return PaperState(res, prep, last, regime, start, capital, stale, mstate, cands, cand_errors)
