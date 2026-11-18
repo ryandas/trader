@@ -16,7 +16,6 @@ AQR, arXiv q-fin, NSE/BSE methodologies, Indian journals), at most 5 new rows pe
 
 | slug | idea | mechanism | source |
 |---|---|---|---|
-| vol_mom | Volatility-managed momentum, ranking version: score = 12-1 month momentum divided by trailing realised daily volatility (window 63 or 126 sessions). Grid (fixed now): top_n 5 buffer 2 or top_n 10 buffer 5, each with window 63 and 126, rebalance M, bear_exit on. NOTE: the rotation contract ranks names; it cannot scale exposure, so the tested idea is the risk-adjusted ranking, not position scaling. | Momentum crashes are concentrated in high-volatility periods, so dividing by volatility should cut crash losses and keep the average return. | Barroso & Santa-Clara (2015), 'Momentum has its moments', JFE 116(1) (cited in the Moskowitz-style volatility-scaling literature; abstract seen via search 2026-11-18, full text not opened). India: none found. |
 | regime_switch | Regime-switched momentum and reversal: when the index is in a calm state use 12-1 momentum, in a crash state use 1-month reversal. Proxy (deviation from paper): crash state = index 20-day volatility above its trailing 1-year 80th (or 90th) percentile. The paper uses a Hidden Markov Model; this proxy avoids a new dependency and is a separate idea. Grid (fixed now): calm/crash percentile 0.8 or 0.9, top_n 10, buffer 5, rebalance M, bear_exit on. | Momentum and reversal are regime-dependent complements; momentum's information coefficient drops in crashes while reversal's rises (paper abstract). | Regime-Dependent Price Formation in Indian Equities (SSRN abstract 7044244, posted 2 Jul 2026, working paper; abstract opened 2026-11-18, full text not read). |
 
 ## Done
@@ -28,6 +27,7 @@ AQR, arXiv q-fin, NSE/BSE methodologies, Indian journals), at most 5 new rows pe
 | max_lottery | 2026-11-18 | FAIL (trial 3) | 3.54% vs index 12.9%, below random picks at every account size. Journal 2026-11-18-max_lottery. |
 | trend_ma | 2026-11-18 | FAIL (trial 4) | 13.68% vs index 12.9%; DSR 0.820 (need 0.95); quarterly grid point 7.7%. Summary reports/research/trend_ma/summary.md. |
 | str_rev | 2026-11-18 | FAIL (trial 5) | -6.31% CAGR vs index 12.74%; charges 4.41%/yr; DSR 0.019. Journal 2026-11-18-str_rev. |
+| vol_mom | 2026-11-18 | FAIL (trial 6) | 13.83% vs index 12.74%, basket 16.1%; 2/6 years; 3 of 4 grid points below index; DSR 0.678. Journal 2026-11-18-vol_mom. |
 
 ## Ideas that came out of results
 - frog_pan_winners: ID rank applied only to PRET>0 stocks (smooth losers were rewarded in frog_pan). New trial.
