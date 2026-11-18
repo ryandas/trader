@@ -45,12 +45,6 @@ PIT = True
 HARNESS_VERSION = "v4-pit-contrib-fresh-start"
 WARM_START = True
 
-# ---- gates (fixed) ----
-DSR_MIN = 0.95
-MAX_ANNUAL_CHARGES_PCT = 3.0
-MAX_CORRELATION = 0.9
-MIN_FOLD_WIN_SHARE = 2 / 3  # of OOS years must beat the index (4 of 6)
-
 
 @dataclass
 class EvalResult:
@@ -156,7 +150,7 @@ def capital_profile(cfg: Config, prep: mom.MomPrep, params: list[mom.MomParams],
     folds = pd.DataFrame(w["folds"])
     mt = summarize(w["equity"], w["trades"], bt.load_benchmark(cfg))
     basket = _cagr(_basket_equity(prep, w["equity"].index, capital))
-    need = max(1, round(MIN_FOLD_WIN_SHARE * len(folds)))
+    need = max(1, round(cfg.research.min_fold_win_share * len(folds)))
     wins = int((folds["oos_return_pct"] > folds["bench_return_pct"]).sum())
     grid_ok = all(_cagr(g) > mt.get("benchmark_cagr_pct", np.inf) for g in w["grid"].values())
     return {
@@ -192,6 +186,13 @@ def evaluate(cfg: Config, instruments: pd.DataFrame, slug: str, record: bool = T
     ecfg = _eval_cfg(cfg)
     params = grid_params(m)
     prep = mom.prepare(ecfg, instruments, PRIMARY_LIQUID_TOP, PIT)
+
+    # Gate thresholds from config (harness v4)
+    r = cfg.research
+    DSR_MIN = r.dsr_min
+    MAX_ANNUAL_CHARGES_PCT = r.max_annual_charges_pct
+    MAX_CORRELATION = r.max_correlation
+    MIN_FOLD_WIN_SHARE = r.min_fold_win_share
 
     gates: dict[str, dict] = {}
     ok_look, why = lookahead_guard(prep, params[0])
@@ -308,7 +309,7 @@ def _forward_only(cfg, ecfg, prep, p, res: EvalResult, m: dict, sha: str, record
         ok = np.isfinite(last[li]) & np.isfinite(base) & prep.liquid[li]
         if ok.sum() > 10:
             corr = float(pd.Series(last[li][ok]).rank().corr(pd.Series(base[ok]).rank()))
-    gates["not_a_duplicate"] = _gate(not (corr >= MAX_CORRELATION),
+    gates["not_a_duplicate"] = _gate(not (corr >= cfg.research.max_correlation),
                                      f"rank correlation with the momentum score on the latest scored day: {corr:.2f}" if not np.isnan(corr)
                                      else "no scored day yet to compare")
     res.metrics = {"estimated_annual_charges_pct": est, "snapshots": snaps}

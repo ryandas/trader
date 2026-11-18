@@ -1,5 +1,5 @@
 mode: paper              # paper only; "live" is a deferred future option and is not implemented
-capital: 5000          # starting capital (INR)
+capital: 25000          # starting capital (INR)
 monthly_contribution: 5000   # INR deposited at each month-end close (0 = lump sum only)
 risk_per_trade: 0.01     # fraction of equity risked per trade
 history_years: 10
@@ -32,3 +32,9 @@ risk:
 costs:                      # delivery equity; see CostCfg for statutory defaults
   brokerage_per_order: 0    # check your Dhan plan
   slippage_bps: 5
+
+research:                   # fixed gates for harness v4 (review if capital/contribution changes)
+  dsr_min: 0.95
+  max_annual_charges_pct: 3.0
+  max_correlation: 0.9
+  min_fold_win_share: 0.6666666666666666  # 2/3 of OOS years must beat index

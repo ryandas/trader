@@ -45,6 +45,14 @@ class CostCfg(BaseModel):
     dp_charge: float = 14.75  # per scrip, sell side: Dhan Rs 12.50 + 18% GST
 
 
+class ResearchCfg(BaseModel):
+    """Fixed gates for the research harness (v4). Review if capital/contribution changes."""
+    dsr_min: float = 0.95
+    max_annual_charges_pct: float = 3.0
+    max_correlation: float = 0.9
+    min_fold_win_share: float = 2.0 / 3.0  # fraction of OOS years that must beat the index
+
+
 class MomentumCfg(BaseModel):
     lookback: int = 126  # trading days of return used for ranking
     skip: int = 21  # most recent days excluded (short-term reversal)
@@ -65,6 +73,7 @@ class Config(BaseModel):
     regime: RegimeCfg = RegimeCfg()
     risk: RiskCfg = RiskCfg()
     costs: CostCfg = CostCfg()
+    research: ResearchCfg = ResearchCfg()
 
 
 def load_config(path: Path | None = None) -> Config:
