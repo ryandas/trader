@@ -1,3 +1,4 @@
+import importlib
 import math
 import sys
 import types
@@ -104,6 +105,7 @@ def write_cand(cdir, slug, body, grid="[{}]", extra=""):
     (cdir / f"{slug}.py").write_text(
         f'META = {{"slug": "{slug}", "kind": "rotation", "hypothesis": "h", "source": "s", "grid": {grid}{extra}}}\n{body}\n')
     sys.modules.pop(f"trader.research.candidates.{slug}", None)
+    importlib.invalidate_caches()  # FileFinder caches dir listings; same-second writes are otherwise missed
 
 
 def test_registry_is_append_only_and_counts(lab):
