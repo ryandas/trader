@@ -66,14 +66,6 @@ class Config(BaseModel):
     risk: RiskCfg = RiskCfg()
     costs: CostCfg = CostCfg()
 
-    @property
-    def data_dir(self) -> Path:
-        return ROOT / "data"
-
-    @property
-    def candles_dir(self) -> Path:
-        return self.data_dir / "candles"
-
 
 def load_config(path: Path | None = None) -> Config:
     path = path or ROOT / "config.yaml"

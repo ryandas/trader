@@ -86,12 +86,10 @@ def backtest(
 ) -> None:
     """Run the portfolio backtest over stored daily candles."""
     import json
-    from pathlib import Path
 
     import pandas as pd
 
     from . import backtest as bt
-    from .config import ROOT
     from .metrics import summarize
     from .strategies import ALL
 
@@ -120,7 +118,6 @@ def walkforward() -> None:
 
     from . import backtest as bt
     from . import walkforward as wf
-    from .config import ROOT
     from .metrics import summarize
 
     cfg = load_config()
@@ -270,7 +267,6 @@ def momentum(
 
     from . import backtest as bt
     from . import momentum as mom
-    from .config import ROOT
 
     cfg = load_config()
     c = cfg.momentum
@@ -301,7 +297,6 @@ def momentum_wf(
 
     from . import backtest as bt
     from . import momentum as mom
-    from .config import ROOT
 
     cfg = load_config()
     prep = mom.prepare(cfg, inst.load_instruments(), liquid_top, pit)

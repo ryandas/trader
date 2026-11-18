@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pandas as pd
 
 from . import backtest as bt
 from . import outputs
-from .config import ROOT, Config
+from .config import Config
 from .metrics import summarize
 from .paper import MomState, PaperState
 
