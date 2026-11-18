@@ -96,7 +96,8 @@ if [ "$rc" -ne 0 ] || [ ! -s "$summary" ]; then
   [ -s "$err" ] && tail -n 20 "$err"
   exit 1
 fi
-cat "$summary"
+# Telegram-ready summary (stdout is the message). Falls back to the raw summary if the formatter fails.
+uv run python "$SCRIPT_DIR/format_research_message.py" "$summary" 2>/dev/null || cat "$summary"
 
 # Guard (c): commit only explicitly allowed paths, never `git add -A`.
 commit_paths=(${keep_untracked[@]+"${keep_untracked[@]}"})
