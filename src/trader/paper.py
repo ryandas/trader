@@ -227,7 +227,7 @@ def _promote(con, cfg, slug, m, sha, trial, start) -> dict:
     gi = int(trial["metrics"]["chosen"]["grid_index"])
     params = ev.grid_params(m)[gi]
     if start is None:
-        start = store.load(cfg.candles_dir, BENCHMARK).index.max()
+        start = store.load(BENCHMARK).index.max()
     entry = {
         "kind": m["kind"], "params": asdict(params), "liquid_top": ev.PRIMARY_LIQUID_TOP, "capital": ev.EVAL_CAPITAL, "contribution": ev.EVAL_CONTRIBUTION,
         "start": str(pd.Timestamp(start).date()), "file_sha256": sha, "trial_id": trial["id"], "active": True,

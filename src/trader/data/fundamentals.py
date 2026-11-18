@@ -2,7 +2,7 @@
 
 yfinance only serves TODAY's figures, with later revisions folded in and no publication dates, so
 backtesting on them would leak the future. Instead we save a copy per run, named by the day it was
-taken (`data/fundamentals/<YYYY-MM-DD>.parquet`). A strategy may only read the newest snapshot dated
+taken (rows of the `fundamentals` table keyed by `snap_date`). A strategy may only read the newest snapshot dated
 on or before the day it is deciding (`asof` / `panel`). Until several years of snapshots exist there
 is no fair backtest history, so fundamentals-based candidates are forward-paper-only.
 """
@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import time
 from datetime import date, datetime
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+from sqlalchemy import text
+
+from .. import db
 
 # column name -> yfinance Ticker.info key
 FIELDS = {
@@ -30,45 +32,47 @@ FIELDS = {
 }
 
 
-def snapshot_dates(fund_dir: Path | None) -> list[pd.Timestamp]:
-    if fund_dir is None or not Path(fund_dir).exists():
-        return []
-    return sorted(pd.Timestamp(p.stem) for p in Path(fund_dir).glob("*.parquet"))
+def snapshot_dates() -> list[pd.Timestamp]:
+    df = db.qdf("SELECT DISTINCT snap_date FROM fundamentals ORDER BY snap_date")
+    return [pd.Timestamp(d) for d in df["snap_date"]]
 
 
-def latest_snapshot_date(fund_dir: Path | None) -> pd.Timestamp | None:
-    d = snapshot_dates(fund_dir)
+def latest_snapshot_date() -> pd.Timestamp | None:
+    d = snapshot_dates()
     return d[-1] if d else None
 
 
-def asof(fund_dir: Path | None, day) -> pd.DataFrame:
+def asof(day) -> pd.DataFrame:
     """Snapshot (index = symbol) of the newest copy dated on or before `day`; empty if none exists."""
     day = pd.Timestamp(day)
-    ok = [d for d in snapshot_dates(fund_dir) if d <= day]
+    ok = [d for d in snapshot_dates() if d <= day]
     if not ok:
         return pd.DataFrame(columns=list(FIELDS))
-    return pd.read_parquet(Path(fund_dir) / f"{ok[-1].date()}.parquet")
+    df = db.qdf(f"SELECT symbol, {', '.join(FIELDS)} FROM fundamentals WHERE snap_date = :d ORDER BY symbol", d=ok[-1].date())
+    return df.set_index("symbol")
 
 
-def panel(fund_dir: Path | None, dates: pd.DatetimeIndex, syms: list[str], field: str) -> np.ndarray:
+def panel(dates: pd.DatetimeIndex, syms: list[str], field: str) -> np.ndarray:
     """(len(dates) x len(syms)) values of `field` as known on each date (NaN before the first snapshot)."""
+    if field not in FIELDS:
+        raise KeyError(field)
     out = np.full((len(dates), len(syms)), np.nan)
-    snaps = snapshot_dates(fund_dir)
-    if not snaps:
+    allrows = db.qdf(f"SELECT snap_date, symbol, {field} FROM fundamentals ORDER BY snap_date")
+    if allrows.empty:
         return out
+    allrows["snap_date"] = pd.to_datetime(allrows["snap_date"])
+    snaps = sorted(allrows["snap_date"].unique())
     pos = {s: i for i, s in enumerate(syms)}
     # snapshot k covers dates in [snaps[k], snaps[k+1]); a date before snaps[0] stays NaN
     bounds = [int(dates.searchsorted(d, side="left")) for d in snaps] + [len(dates)]
+    by_day = {d: g for d, g in allrows.groupby("snap_date")}
     for k, d in enumerate(snaps):
         lo, hi = bounds[k], bounds[k + 1]
         if lo >= hi:
             continue
-        df = pd.read_parquet(Path(fund_dir) / f"{d.date()}.parquet")
-        if field not in df:
-            continue
         row = np.full(len(syms), np.nan)
-        for sym, v in df[field].items():
-            if sym in pos:
+        for sym, v in zip(by_day[d]["symbol"], by_day[d][field]):
+            if sym in pos and v is not None:
                 row[pos[sym]] = v
         out[lo:hi] = row
     return out
@@ -78,14 +82,12 @@ def ist_today() -> date:
     return datetime.now(ZoneInfo("Asia/Kolkata")).date()
 
 
-def snapshot(fund_dir: Path, symbols: list[str], day: date | None = None, pause: float = 0.3, retries: int = 2):
-    """Fetch today's fundamentals for `symbols` and save them as `<day>.parquet`.
-    Returns (path, rows_saved, failed_symbols). Missing fields stay NaN."""
+def snapshot(symbols: list[str], day: date | None = None, pause: float = 0.3, retries: int = 2):
+    """Fetch today's fundamentals for `symbols` and save them under `snap_date = day`.
+    Returns (day, rows_saved, failed_symbols). Missing fields stay NaN (NULL)."""
     import yfinance as yf
 
     day = day or ist_today()
-    fund_dir = Path(fund_dir)
-    fund_dir.mkdir(parents=True, exist_ok=True)
     rows, failed = {}, []
     for sym in symbols:
         info = None
@@ -102,10 +104,20 @@ def snapshot(fund_dir: Path, symbols: list[str], day: date | None = None, pause:
         time.sleep(pause)
     df = pd.DataFrame.from_dict(rows, orient="index", columns=list(FIELDS))
     df.index.name = "symbol"
-    path = fund_dir / f"{day}.parquet"
     if len(df):
-        df.to_parquet(path)
-    return path, len(df), failed
+        save_snapshot(day, df)
+    return day, len(df), failed
+
+
+def save_snapshot(day, df: pd.DataFrame) -> None:
+    """Store one dated snapshot (index = symbol, FIELDS columns), replacing any earlier copy of the same day."""
+    recs = [{"d": pd.Timestamp(day).date(), "s": sym, **{k: (None if k not in df.columns or pd.isna(r[k]) else float(r[k])) for k in FIELDS}}
+            for sym, r in df.iterrows()]
+    cols = ", ".join(FIELDS)
+    with db.engine().begin() as c:
+        c.execute(text("DELETE FROM fundamentals WHERE snap_date = :d"), {"d": pd.Timestamp(day).date()})
+        c.execute(text(f"INSERT INTO fundamentals (snap_date, symbol, {cols}) VALUES (:d, :s, "
+                       + ", ".join(f":{k}" for k in FIELDS) + ")"), recs)
 
 
 def _num(v) -> float:

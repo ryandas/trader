@@ -19,23 +19,39 @@ import re
 
 import numpy as np
 import pandas as pd
+from sqlalchemy import text
 
+from .. import db
 from . import store
 
 
-def snap_dir(data_dir: Path) -> Path:
-    return data_dir / "membership" / "snapshots"
+SNAP_COLS = ["Company Name", "Industry", "Symbol", "Series", "ISIN Code"]
 
 
-def load_snapshots(data_dir: Path) -> dict[pd.Timestamp, pd.DataFrame]:
+def load_snapshots() -> dict[pd.Timestamp, pd.DataFrame]:
+    """Dated NIFTY 500 lists (each the truth on its date), columns as in NSE's ind_nifty500list.csv."""
+    df = db.qdf("SELECT snap_date, company_name, industry, symbol, series, isin FROM membership_snapshots "
+                "ORDER BY snap_date, symbol")
+    if df.empty:
+        raise SystemExit("No membership snapshots in the database.")
     out = {}
-    for f in sorted(snap_dir(data_dir).glob("*.csv")):
-        d = pd.read_csv(f)
-        d.columns = [c.strip() for c in d.columns]
-        out[pd.Timestamp(f.stem)] = d
-    if not out:
-        raise SystemExit(f"No membership snapshots in {snap_dir(data_dir)}.")
+    for d, g in df.groupby("snap_date", sort=True):
+        out[pd.Timestamp(d)] = g.drop(columns="snap_date").set_axis(SNAP_COLS, axis=1).reset_index(drop=True)
     return out
+
+
+def save_snapshot(day, d: pd.DataFrame) -> int:
+    """Store one dated list (columns as NSE's CSV), replacing any earlier copy of the same day."""
+    d = d.rename(columns=lambda c: c.strip())
+    d = d.astype(object).where(d.notna(), None)
+    day = pd.Timestamp(day).date()
+    recs = [{"d": day, "n": r[SNAP_COLS[0]], "i": r[SNAP_COLS[1]], "s": r[SNAP_COLS[2]], "e": r[SNAP_COLS[3]],
+             "n2": r[SNAP_COLS[4]]} for _, r in d.iterrows()]
+    with db.engine().begin() as c:
+        c.execute(text("DELETE FROM membership_snapshots WHERE snap_date = :d"), {"d": day})
+        c.execute(text("INSERT INTO membership_snapshots (snap_date, company_name, industry, symbol, series, isin) "
+                       "VALUES (:d, :n, :i, :s, :e, :n2)"), recs)
+    return len(recs)
 
 
 def companies(snaps: dict[pd.Timestamp, pd.DataFrame]) -> tuple[dict[str, str], pd.DataFrame]:
@@ -73,35 +89,40 @@ def isin_symbols(snaps: dict[pd.Timestamp, pd.DataFrame]) -> pd.DataFrame:
     return companies(snaps)[1]
 
 
-EVENTS_FILE = "events.csv"  # parsed from NSE press releases (see parse_release)
-MANUAL_FILE = "manual_events.csv"  # hand-checked fixes: eff_date,symbol,action(+1/-1),note
-
-
-def load_events(data_dir: Path) -> pd.DataFrame:
+def load_events() -> pd.DataFrame:
     """Dated NIFTY 500 inclusions (+1) and exclusions (-1) from press releases and manual fixes, effective on `eff_date`."""
-    parts = []
-    for name in (EVENTS_FILE, MANUAL_FILE):
-        f = data_dir / "membership" / name
-        if f.exists():
-            d = pd.read_csv(f, parse_dates=["eff_date"])
-            parts.append(d[["eff_date", "symbol", "action"]])
-    if not parts:
+    d = db.qdf("SELECT eff_date, symbol, action FROM membership_events ORDER BY eff_date, symbol")
+    if d.empty:
         return pd.DataFrame(columns=["eff_date", "symbol", "action"])
-    return pd.concat(parts, ignore_index=True).drop_duplicates()
+    d["eff_date"] = pd.to_datetime(d["eff_date"])
+    return d.drop_duplicates().reset_index(drop=True)
 
 
-def timeline(data_dir: Path, use_events: bool = True) -> tuple[list[tuple[pd.Timestamp, frozenset]], list[dict]]:
+def save_events(df: pd.DataFrame, manual: bool = False) -> int:
+    """Replace the parsed (or, with manual=True, the hand-checked) events. Columns: eff_date, symbol, action[, release, note]."""
+    recs = [{"d": pd.Timestamp(r.eff_date).date(), "s": r.symbol, "a": int(r.action),
+             "r": getattr(r, "release", None) if not manual else None,
+             "n": getattr(r, "note", None) if manual else None, "m": manual} for r in df.itertuples()]
+    with db.engine().begin() as c:
+        c.execute(text("DELETE FROM membership_events WHERE manual = :m"), {"m": manual})
+        if recs:
+            c.execute(text("INSERT INTO membership_events (eff_date, symbol, action, release, note, manual) "
+                           "VALUES (:d, :s, :a, :r, :n, :m)"), recs)
+    return len(recs)
+
+
+def timeline(use_events: bool = True) -> tuple[list[tuple[pd.Timestamp, frozenset]], list[dict]]:
     """Membership change points [(date, set of keys)] and a per-gap report.
 
     Each snapshot is the truth on its date. Between two snapshots the announced press-release changes (effective date strictly
     after the earlier snapshot and before the later one) are applied on their effective dates. Whatever the events do not
     explain is reset at the later snapshot (late for joiners, late for leavers: the safe direction). A key is the ISIN, or
     `sym:SYMBOL` for a company that joined and left between snapshots and never appears in one."""
-    snaps = load_snapshots(data_dir)
+    snaps = load_snapshots()
     keyof, _ = companies(snaps)
     keyed = lambda sym: keyof.get(sym, sym)  # noqa: E731  (an event symbol never seen in a snapshot is its own company)
     truth = [(t, frozenset(keyof[x] for x in d.iloc[:, 2])) for t, d in snaps.items()]
-    ev = load_events(data_dir) if use_events else pd.DataFrame(columns=["eff_date", "symbol", "action"])
+    ev = load_events() if use_events else pd.DataFrame(columns=["eff_date", "symbol", "action"])
     points, report = [], []
     for k, (a, S) in enumerate(truth):
         points.append((a, S))
@@ -120,19 +141,19 @@ def timeline(data_dir: Path, use_events: bool = True) -> tuple[list[tuple[pd.Tim
     return points, report
 
 
-def all_symbols(data_dir: Path) -> list[str]:
+def all_symbols() -> list[str]:
     """Candle-store keys for every company that was ever a member: latest symbol per ISIN, plus event-only symbols."""
-    snaps = load_snapshots(data_dir)
+    snaps = load_snapshots()
     keyof, table = companies(snaps)
-    ev = load_events(data_dir)
+    ev = load_events()
     return list(table["symbol"]) + sorted({s for s in ev["symbol"] if s not in keyof})
 
 
-def member_panel(data_dir: Path, dates: pd.DatetimeIndex, syms: list[str]) -> np.ndarray:
+def member_panel(dates: pd.DatetimeIndex, syms: list[str]) -> np.ndarray:
     """(dates x syms) True where the symbol was a NIFTY 500 member on that day (see `timeline`). Before the first snapshot the
     first snapshot is used (not point-in-time)."""
     col = {s: i for i, s in enumerate(syms)}
-    points, _ = timeline(data_dir)
+    points, _ = timeline()
     masks = []
     for _, st in points:
         m = np.zeros(len(syms), dtype=bool)
@@ -146,8 +167,8 @@ def member_panel(data_dir: Path, dates: pd.DatetimeIndex, syms: list[str]) -> np
     return np.vstack(masks)[which]
 
 
-def first_snapshot(data_dir: Path) -> pd.Timestamp:
-    return next(iter(load_snapshots(data_dir)))
+def first_snapshot() -> pd.Timestamp:
+    return next(iter(load_snapshots()))
 
 
 def fetch_missing(cfg, source=None, years: int | None = None) -> pd.DataFrame:
@@ -155,16 +176,16 @@ def fetch_missing(cfg, source=None, years: int | None = None) -> pd.DataFrame:
     from .sources import YFinanceSource
 
     source = source or YFinanceSource()
-    snaps = load_snapshots(cfg.data_dir)
+    snaps = load_snapshots()
     info = isin_symbols(snaps)
     log = []
     todo = [(r.symbol, r.name, r.last_seen.date()) for r in info.itertuples()]
-    todo += [(sym, "", None) for sym in all_symbols(cfg.data_dir) if sym not in set(info["symbol"])]
+    todo += [(sym, "", None) for sym in all_symbols() if sym not in set(info["symbol"])]
     for sym, name, seen in todo:
-        if store.load(cfg.candles_dir, sym) is not None or sym.startswith("DUMMY"):
+        if store.load(sym) is not None or sym.startswith("DUMMY"):
             continue
         try:
-            n = store.update_symbol(source, cfg.candles_dir, sym, 0, years or cfg.history_years)
+            n = store.update_symbol(source, sym, 0, years or cfg.history_years)
             log.append({"symbol": sym, "name": name, "rows": n, "last_seen": seen})
         except Exception as e:  # a bad ticker must not stop the run
             log.append({"symbol": sym, "name": name, "rows": 0, "last_seen": seen, "error": str(e)[:80]})
@@ -172,14 +193,25 @@ def fetch_missing(cfg, source=None, years: int | None = None) -> pd.DataFrame:
         print(f"{r.symbol}: {log[-1]['rows']}", flush=True)
     out = pd.DataFrame(log)
     if len(out):
-        out[out["rows"] == 0].to_csv(cfg.data_dir / "membership" / "unavailable.csv", index=False)
+        save_unavailable(out[out["rows"] == 0])
     return out
+
+
+def save_unavailable(df: pd.DataFrame) -> None:
+    """Past members with no price history at the source (replaces the list)."""
+    recs = [{"s": r.symbol, "n": r.name, "r": int(r.rows), "l": None if r.last_seen is None else str(r.last_seen)}
+            for r in df.itertuples()]
+    with db.engine().begin() as c:
+        c.execute(text("DELETE FROM membership_unavailable"))
+        if recs:
+            c.execute(text("INSERT INTO membership_unavailable (symbol, name, rows, last_seen) VALUES (:s, :n, :r, :l) "
+                           "ON CONFLICT (symbol) DO NOTHING"), recs)
 
 
 SNAPSHOT_URL = "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv"
 
 
-def save_current_snapshot(data_dir: Path, day: pd.Timestamp | None = None) -> Path:
+def save_current_snapshot(day: pd.Timestamp | None = None) -> int:
     """Save today's official NIFTY 500 list as a dated snapshot (run it monthly so future tests stay point-in-time)."""
     import io
 
@@ -191,10 +223,7 @@ def save_current_snapshot(data_dir: Path, day: pd.Timestamp | None = None) -> Pa
     if len(d) < 400 or "ISIN Code" not in [c.strip() for c in d.columns]:
         raise SystemExit("Unexpected NIFTY 500 list format; snapshot not saved.")
     day = day or pd.Timestamp.today().normalize()
-    path = snap_dir(data_dir) / f"{day:%Y%m%d}.csv"
-    snap_dir(data_dir).mkdir(parents=True, exist_ok=True)
-    path.write_text(r.text)
-    return path
+    return save_snapshot(day, d)
 
 
 # ---------------------------------------------------------------- NSE press releases

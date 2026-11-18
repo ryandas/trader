@@ -294,7 +294,7 @@ def _forward_only(cfg, ecfg, prep, p, res: EvalResult, m: dict, sha: str, record
     from .. import paper
 
     gates = res.gates
-    snaps = len(fundamentals.snapshot_dates(prep.fund_dir))
+    snaps = len(fundamentals.snapshot_dates())
     gates["has_fundamentals_snapshots"] = _gate(snaps > 0, f"{snaps} snapshot(s) on file")
     # cost estimate: share of capital lost to charges per year for a given monthly turnover of the book
     from ..costs import trade_costs

@@ -1,23 +1,55 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
-from pathlib import Path
 
 import pandas as pd
+from sqlalchemy import text
 
+from .. import db
 from .dhan import IST
 from .sources import CandleSource
 
 MARKET_CLOSE_HOUR = 16  # IST; before this, today's bar may be partial
 
 
-def _path(candles_dir: Path, symbol: str) -> Path:
-    return candles_dir / f"{symbol}.parquet"
+COLS = ["open", "high", "low", "close", "volume"]
 
 
-def load(candles_dir: Path, symbol: str) -> pd.DataFrame | None:
-    p = _path(candles_dir, symbol)
-    return pd.read_parquet(p) if p.exists() else None
+def _frame(df: pd.DataFrame) -> pd.DataFrame:
+    df["date"] = pd.to_datetime(df["date"]).astype("datetime64[ns]")  # same resolution the parquet store had
+    df = df.set_index("date")[COLS]
+    return df.astype({"open": "float64", "high": "float64", "low": "float64", "close": "float64", "volume": "int64"})
+
+
+def load(symbol: str) -> pd.DataFrame | None:
+    """Daily candles of one symbol (DatetimeIndex 'date'; open/high/low/close/volume), or None."""
+    df = db.qdf("SELECT date, open, high, low, close, volume FROM candles WHERE symbol = :s ORDER BY date", s=symbol)
+    return _frame(df) if len(df) else None
+
+
+def load_many(symbols: list[str]) -> dict[str, pd.DataFrame]:
+    """Candles for many symbols in one round trip (COPY). Keeps the order of `symbols`; absent ones are left out."""
+    if not symbols:
+        return {}
+    lit = ",".join("'" + s.replace("'", "''") + "'" for s in symbols)
+    df = db.copy_df(f"SELECT symbol, date, open, high, low, close, volume FROM candles "
+                    f"WHERE symbol = ANY(ARRAY[{lit}]) ORDER BY symbol, date")
+    groups = {s: g.drop(columns="symbol") for s, g in df.groupby("symbol", sort=False)}
+    return {s: _frame(groups[s].copy()) for s in symbols if s in groups}
+
+
+def _write(symbol: str, df: pd.DataFrame, replace: bool) -> None:
+    """Upsert candle rows (or, with replace, delete the symbol's history first) in one transaction."""
+    rows = [{"s": symbol, "d": d.date(), "o": float(r.open), "h": float(r.high), "l": float(r.low),
+             "c": float(r.close), "v": int(r.volume)} for d, r in df.iterrows()]
+    with db.engine().begin() as c:
+        if replace:
+            c.execute(text("DELETE FROM candles WHERE symbol = :s"), {"s": symbol})
+        if rows:
+            c.execute(text(
+                "INSERT INTO candles (symbol, date, open, high, low, close, volume) VALUES (:s, :d, :o, :h, :l, :c, :v) "
+                "ON CONFLICT (symbol, date) DO UPDATE SET open = EXCLUDED.open, high = EXCLUDED.high, "
+                "low = EXCLUDED.low, close = EXCLUDED.close, volume = EXCLUDED.volume"), rows)
 
 
 def last_complete_day(now: datetime | None = None) -> date:
@@ -51,17 +83,15 @@ def _differs(a: pd.DataFrame, b: pd.DataFrame) -> bool:
 
 def update_symbol(
     source: CandleSource,
-    candles_dir: Path,
     symbol: str,
     security_id: str | int,
     years: int = 5,
     now: datetime | None = None,
 ) -> int:
     """Backfill, extend or incrementally update one symbol. Returns net rows added."""
-    candles_dir.mkdir(parents=True, exist_ok=True)
     end = last_complete_day(now)
     want_start = end - timedelta(days=int(365.25 * years))
-    old = load(candles_dir, symbol)
+    old = load(symbol)
     old = old if old is not None and len(old) else None
     parts: list[pd.DataFrame] = []
 
@@ -89,6 +119,11 @@ def update_symbol(
     merged = new if old is None else pd.concat([old, new])
     merged = merged[~merged.index.duplicated(keep="last")].sort_index()
     before = 0 if old is None else len(old)
-    if old is None or len(merged) != before or _differs(merged, old):
-        merged.to_parquet(_path(candles_dir, symbol))
+    if old is None:
+        _write(symbol, merged, replace=True)  # first load, or a split/bonus re-adjustment discarded the history
+    elif len(merged) != before or _differs(merged, old):
+        common = merged.index.intersection(old.index)
+        diff = merged.loc[common].astype("float64").ne(old.loc[common].astype("float64")).any(axis=1)
+        changed = pd.concat([merged[~merged.index.isin(old.index)], merged.loc[common][diff]])
+        _write(symbol, changed, replace=False)
     return len(merged) - before

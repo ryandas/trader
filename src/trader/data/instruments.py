@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import io
-from pathlib import Path
 
 import httpx
 import pandas as pd
+from sqlalchemy import text
+
+from .. import db
 
 NIFTY500_URL = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
 SCRIP_MASTER_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
@@ -18,8 +20,8 @@ def _get(url: str) -> pd.DataFrame:
     return pd.read_csv(io.StringIO(r.text), low_memory=False)
 
 
-def build_instruments(data_dir: Path) -> pd.DataFrame:
-    """NIFTY 500 constituents joined to Dhan securityIds. Cached as CSV."""
+def build_instruments() -> pd.DataFrame:
+    """NIFTY 500 constituents joined to Dhan securityIds. Stored in the `instruments` table."""
     n500 = _get(NIFTY500_URL)[["Symbol", "Company Name", "Industry"]]
     n500.columns = ["symbol", "name", "sector"]
     sm = _get(SCRIP_MASTER_URL)
@@ -40,14 +42,21 @@ def build_instruments(data_dir: Path) -> pd.DataFrame:
     out = out.dropna(subset=["security_id"])
     out["security_id"] = out["security_id"].astype(int)
     if len(out) < MIN_ROWS:
-        raise ValueError(f"only {len(out)} instruments (< {MIN_ROWS}); refusing to overwrite instruments.csv")
-    data_dir.mkdir(parents=True, exist_ok=True)
-    out.to_csv(data_dir / "instruments.csv", index=False)
+        raise ValueError(f"only {len(out)} instruments (< {MIN_ROWS}); refusing to overwrite the instruments table")
+    save_instruments(out)
     return out
 
 
-def load_instruments(data_dir: Path) -> pd.DataFrame:
-    p = data_dir / "instruments.csv"
-    if not p.exists():
+def save_instruments(df: pd.DataFrame) -> None:
+    """Replace the whole instrument list in one transaction."""
+    rows = [{"o": k, "s": r.symbol, "n": r.name, "c": r.sector, "i": int(r.security_id)} for k, r in enumerate(df.itertuples())]
+    with db.engine().begin() as c:
+        c.execute(text("DELETE FROM instruments"))
+        c.execute(text("INSERT INTO instruments (ord, symbol, name, sector, security_id) VALUES (:o, :s, :n, :c, :i)"), rows)
+
+
+def load_instruments() -> pd.DataFrame:
+    df = db.qdf("SELECT symbol, name, sector, security_id FROM instruments ORDER BY ord")
+    if df.empty:
         raise SystemExit("Run `trader init` first to build the instrument list.")
-    return pd.read_csv(p)
+    return df

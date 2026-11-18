@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from trader import momentum as mom
+from helpers import patch_candles
 from trader import paper
 from trader.config import Config
 from trader.data import fundamentals as fund
@@ -88,7 +89,7 @@ def lab(monkeypatch, tmp_path):
     """Synthetic market + temp data dir + temp candidates dir + temp reports root."""
     frames = {f"S{i}": synth(700, seed=i, drift=0.0005 + 0.0002 * (i % 5)) for i in range(30)}
     frames["NIFTY500"] = synth(700, seed=99, drift=0.0004)
-    monkeypatch.setattr(store, "load", lambda d, s: frames.get(s))
+    patch_candles(monkeypatch, frames)
     monkeypatch.setattr(Config, "data_dir", property(lambda self: tmp_path))
     monkeypatch.setattr(evaluate, "ROOT", tmp_path)
     monkeypatch.setattr(evaluate, "PIT", False)  # synthetic market has no membership snapshots; tests cover gate logic
@@ -142,16 +143,14 @@ def test_evaluate_fails_a_leaky_candidate_without_backtesting(lab):
 
 
 # ---------------------------------------------------------------- fundamentals
-def test_fundamentals_asof_and_panel_never_use_later_snapshots(tmp_path):
-    d = tmp_path / "f"
-    d.mkdir()
+def test_fundamentals_asof_and_panel_never_use_later_snapshots(pg):
     for day, roe in (("2026-01-10", 0.10), ("2026-03-10", 0.30)):
-        pd.DataFrame({"roe": [roe, roe]}, index=pd.Index(["A", "B"], name="symbol")).to_parquet(d / f"{day}.parquet")
-    assert fund.asof(d, "2026-01-09").empty
-    assert fund.asof(d, "2026-03-09")["roe"].iloc[0] == 0.10
-    assert fund.asof(d, "2026-03-10")["roe"].iloc[0] == 0.30
+        fund.save_snapshot(day, pd.DataFrame({"roe": [roe, roe]}, index=pd.Index(["A", "B"], name="symbol")))
+    assert fund.asof("2026-01-09").empty
+    assert fund.asof("2026-03-09")["roe"].iloc[0] == 0.10
+    assert fund.asof("2026-03-10")["roe"].iloc[0] == 0.30
     dates = pd.bdate_range("2026-01-05", "2026-04-01")
-    pan = fund.panel(d, dates, ["A", "B", "C"], "roe")
+    pan = fund.panel(dates, ["A", "B", "C"], "roe")
     assert np.isnan(pan[dates < "2026-01-10"]).all()  # nothing known before the first snapshot
     assert (pan[(dates >= "2026-01-10") & (dates < "2026-03-10"), 0] == 0.10).all()
     assert (pan[dates >= "2026-03-10", 0] == 0.30).all()
@@ -216,12 +215,10 @@ def test_candidate_cap(lab, monkeypatch):
         paper.promote_candidate(cfg, inst, "t_c1", idx[300])
 
 
-def test_fundamentals_candidate_is_forward_only_never_pass(lab):
+def test_fundamentals_candidate_is_forward_only_never_pass(pg, lab):
     cfg, inst, idx, cdir = lab
-    fdir = cfg.data_dir / "fundamentals"
-    fdir.mkdir()
-    pd.DataFrame({"roe": np.linspace(0.05, 0.4, 30)}, index=pd.Index([f"S{i}" for i in range(30)], name="symbol")
-                 ).to_parquet(fdir / f"{idx[400].date()}.parquet")
+    fund.save_snapshot(idx[400], pd.DataFrame({"roe": np.linspace(0.05, 0.4, 30)},
+                                              index=pd.Index([f"S{i}" for i in range(30)], name="symbol")))
     paper.init_momentum(cfg, idx[300], mom.MomParams(top_n=5, buffer=3), None)
     write_cand(cdir, "t_fund", 'def score(prep, **k):\n    return prep.fund_panel("roe")', extra=', "uses_fundamentals": True')
     res = evaluate.evaluate(cfg, inst, "t_fund")
@@ -235,7 +232,7 @@ def test_fundamentals_candidate_is_forward_only_never_pass(lab):
 def test_capital_profile_costs_bite_small_accounts(monkeypatch):
     frames = {f"S{i}": synth(1700, seed=i, drift=0.0005 + 0.0002 * (i % 5)) for i in range(30)}
     frames["NIFTY500"] = synth(1700, seed=99, drift=0.0004)
-    monkeypatch.setattr(store, "load", lambda d, s: frames.get(s))
+    patch_candles(monkeypatch, frames)
     inst = pd.DataFrame({"symbol": [f"S{i}" for i in range(30)], "sector": "X"})
     cfg = Config(capital=5000)
     prep = mom.prepare(cfg, inst, 100)

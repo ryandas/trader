@@ -34,7 +34,7 @@ DDL = [
     """CREATE TABLE IF NOT EXISTS candles (
         symbol TEXT NOT NULL, date DATE NOT NULL, open DOUBLE PRECISION, high DOUBLE PRECISION,
         low DOUBLE PRECISION, close DOUBLE PRECISION, volume BIGINT, PRIMARY KEY (symbol, date))""",
-    "CREATE TABLE IF NOT EXISTS instruments (symbol TEXT PRIMARY KEY, data JSONB NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS instruments (ord INTEGER NOT NULL, symbol TEXT PRIMARY KEY, name TEXT, sector TEXT, security_id BIGINT)",
     """CREATE TABLE IF NOT EXISTS membership_snapshots (
         snap_date DATE NOT NULL, company_name TEXT, industry TEXT, symbol TEXT, series TEXT, isin TEXT)""",
     "CREATE INDEX IF NOT EXISTS membership_snapshots_date ON membership_snapshots (snap_date)",

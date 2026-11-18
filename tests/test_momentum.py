@@ -3,6 +3,7 @@ import pandas as pd
 import pytest
 
 from trader import momentum as mom
+from helpers import patch_candles
 from trader.config import Config
 from trader.data import store
 from test_strategies_backtest import synth
@@ -16,7 +17,7 @@ def world(monkeypatch, bench_drift=0.0004, truncate=None):
     frames["NIFTY500"] = synth(N_BARS, seed=99, drift=bench_drift)
     if truncate is not None:
         frames = {k: v.iloc[: truncate + 1] for k, v in frames.items()}
-    monkeypatch.setattr(store, "load", lambda d, s: frames.get(s))
+    patch_candles(monkeypatch, frames)
     inst = pd.DataFrame({"symbol": [f"S{i}" for i in range(N_SYM)], "sector": "X"})
     cfg = Config(capital=1_000_000)
     return cfg, mom.prepare(cfg, inst), frames["NIFTY500"].index

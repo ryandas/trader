@@ -17,13 +17,12 @@ def _frame(day):
     return pd.DataFrame({"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 10.0}, index=idx)
 
 
-def test_update_continues_past_failures_and_warns(tmp_path, monkeypatch):
+def test_update_continues_past_failures_and_warns(pg, monkeypatch):
     cfg = Config()
-    monkeypatch.setattr(Config, "data_dir", property(lambda self: tmp_path))
     monkeypatch.setattr(cli, "load_config", lambda: cfg)
     monkeypatch.setattr(
         cli.inst, "load_instruments",
-        lambda d: pd.DataFrame({"symbol": ["BAD", "EMPTY", "GOOD"], "security_id": [1, 2, 3]}),
+        lambda: pd.DataFrame({"symbol": ["BAD", "EMPTY", "GOOD"], "security_id": [1, 2, 3]}),
     )
 
     class Src:
@@ -40,7 +39,7 @@ def test_update_continues_past_failures_and_warns(tmp_path, monkeypatch):
     assert res.exit_code == 0, res.output
     assert "BAD: ERROR RuntimeError: boom" in res.output
     assert "WARNING: 2 symbols not updated: BAD, EMPTY" in res.output
-    assert store.load(tmp_path / "candles", "GOOD") is not None
+    assert store.load("GOOD") is not None
 
 
 def _patch_instruments(monkeypatch, n500_rows, eq_rows):
@@ -52,20 +51,21 @@ def _patch_instruments(monkeypatch, n500_rows, eq_rows):
     monkeypatch.setattr(inst, "_get", lambda url: n500 if url == inst.NIFTY500_URL else sm)
 
 
-def test_instruments_drops_duplicates(tmp_path, monkeypatch, capsys):
+def test_instruments_drops_duplicates(pg, monkeypatch, capsys):
     syms = [f"S{i}" for i in range(450)] + ["S0"]  # S0 listed twice in the scrip master
     _patch_instruments(monkeypatch, 450, syms)
-    out = inst.build_instruments(tmp_path)
+    out = inst.build_instruments()
     assert len(out) == 450 and out["symbol"].is_unique
+    assert len(inst.load_instruments()) == 450
     assert "1 duplicate" in capsys.readouterr().out
 
 
-def test_instruments_refuses_small_result_and_keeps_file(tmp_path, monkeypatch):
-    (tmp_path / "instruments.csv").write_text("symbol\nKEEP\n")
+def test_instruments_refuses_small_result_and_keeps_table(pg, monkeypatch):
+    inst.save_instruments(pd.DataFrame({"symbol": ["KEEP"], "name": "k", "sector": "x", "security_id": [1]}))
     _patch_instruments(monkeypatch, 10, [f"S{i}" for i in range(10)])
     with pytest.raises(ValueError, match="refusing"):
-        inst.build_instruments(tmp_path)
-    assert (tmp_path / "instruments.csv").read_text() == "symbol\nKEEP\n"
+        inst.build_instruments()
+    assert list(inst.load_instruments()["symbol"]) == ["KEEP"]
 
 
 def test_holiday_warning(tmp_path):

@@ -15,8 +15,8 @@ app = typer.Typer(no_args_is_help=True, help="Systematic daily swing trader (NIF
 def init() -> None:
     """Build the NIFTY 500 -> Dhan securityId instrument list."""
     cfg = load_config()
-    df = inst.build_instruments(cfg.data_dir)
-    typer.echo(f"{len(df)} instruments written to {cfg.data_dir / 'instruments.csv'}")
+    df = inst.build_instruments()
+    typer.echo(f"{len(df)} instruments written to the database")
 
 
 @app.command()
@@ -26,7 +26,7 @@ def update(
 ) -> None:
     """Backfill / incrementally update daily candles."""
     cfg = load_config()
-    df = inst.load_instruments(cfg.data_dir)
+    df = inst.load_instruments()
     if symbols:
         df = df[df["symbol"].isin(symbols)]
     if source == "dhan":
@@ -36,7 +36,7 @@ def update(
         src = YFinanceSource()
     total = 0
     if not symbols:  # refresh the benchmark index alongside the full universe
-        store.update_symbol(src, cfg.candles_dir, BENCHMARK, 0, cfg.history_years)
+        store.update_symbol(src, BENCHMARK, 0, cfg.history_years)
     from . import sessions
 
     target = sessions.last_session_on_or_before(store.last_complete_day())
@@ -44,7 +44,7 @@ def update(
     for i, row in enumerate(df.itertuples(), 1):
         try:
             n = store.update_symbol(
-                src, cfg.candles_dir, row.symbol, row.security_id, cfg.history_years
+                src, row.symbol, row.security_id, cfg.history_years
             )
         except DhanAuthError as e:
             raise SystemExit(str(e))
@@ -55,7 +55,7 @@ def update(
         total += n
         typer.echo(f"[{i}/{len(df)}] {row.symbol}: +{n}")
         if n == 0:
-            have = store.load(cfg.candles_dir, row.symbol)
+            have = store.load(row.symbol)
             if have is None or not len(have) or have.index.max().date() < target:
                 not_updated.append(row.symbol)
     if not_updated:
@@ -85,7 +85,7 @@ def backtest(
     cfg = load_config()
     names = list(ALL) if strategy == "all" else [strategy]
     strats = {n: ALL[n]() for n in names}
-    prep = bt.prepare(cfg, inst.load_instruments(cfg.data_dir), list(strats.values()), filters)
+    prep = bt.prepare(cfg, inst.load_instruments(), list(strats.values()), filters)
     res = bt.run(cfg, prep, strats, pd.Timestamp(from_), pd.Timestamp(to) if to else None)
     outdir = ROOT / out
     outdir.mkdir(parents=True, exist_ok=True)
@@ -115,7 +115,7 @@ def walkforward(
     from .metrics import summarize
 
     cfg = load_config()
-    instruments = inst.load_instruments(cfg.data_dir)
+    instruments = inst.load_instruments()
     grid = wf.build_grid()
     prep = bt.prepare(cfg, instruments, list(grid.values()), filters=True)
     base_prep = bt.prepare(cfg, instruments, [g for k, g in grid.items() if k.endswith("#0")], filters=False)
@@ -160,7 +160,7 @@ def paper_init(
 
     cfg = load_config()
     if start is None:
-        bench = store.load(cfg.candles_dir, BENCHMARK)
+        bench = store.load(BENCHMARK)
         start = str(bench.index.max().date())
     meta = paper.init(cfg, pd.Timestamp(start), reset)
     typer.echo(f"Paper ledger started at {meta['start']} with capital {meta['capital']:,.0f}.")
@@ -193,7 +193,7 @@ def paper_momentum(
     c = cfg.momentum
     p = mom.MomParams(c.lookback, c.skip, c.top_n, c.buffer, c.bear_exit)
     if start is None:
-        start = str(store.load(cfg.candles_dir, BENCHMARK).index.max().date())
+        start = str(store.load(BENCHMARK).index.max().date())
     mm = paper.init_momentum(cfg, pd.Timestamp(start), p, liquid_top, reset)
     typer.echo(f"Momentum sleeve started {mm['start']} with capital {mm['capital']:,.0f} + {mm['contribution']:,.0f} each month-end: {p.label()}"
                + (f", liquid top {liquid_top}" if liquid_top else ""))
@@ -208,7 +208,7 @@ def daily(
     from . import paper, report
 
     cfg = load_config()
-    instruments = inst.load_instruments(cfg.data_dir)
+    instruments = inst.load_instruments()
     if not no_update and asof is None:
         update(None, "yfinance")  # refresh the whole universe + benchmark
     st = paper.sync(cfg, instruments, asof)
@@ -270,7 +270,7 @@ def momentum(
         lookback or c.lookback, skip if skip is not None else c.skip, top_n or c.top_n,
         buffer if buffer is not None else c.buffer, c.bear_exit if bear_exit is None else bear_exit,
     )
-    prep = mom.prepare(cfg, inst.load_instruments(cfg.data_dir), liquid_top, pit)
+    prep = mom.prepare(cfg, inst.load_instruments(), liquid_top, pit)
     res = mom.run(cfg, prep, p, pd.Timestamp(from_), pd.Timestamp(to) if to else None)
     outdir = ROOT / out
     outdir.mkdir(parents=True, exist_ok=True)
@@ -299,7 +299,7 @@ def momentum_wf(
     from .config import ROOT
 
     cfg = load_config()
-    prep = mom.prepare(cfg, inst.load_instruments(cfg.data_dir), liquid_top, pit)
+    prep = mom.prepare(cfg, inst.load_instruments(), liquid_top, pit)
     res = mom.walk_forward(cfg, prep)
     bench = bt.load_benchmark(cfg)
     outdir = ROOT / out
@@ -324,7 +324,7 @@ def membership_snapshot() -> None:
     """Save today's official NIFTY 500 list as a dated snapshot (point-in-time universe data; run about monthly)."""
     from .data import membership
 
-    typer.echo(f"saved {membership.save_current_snapshot(load_config().data_dir)}")
+    typer.echo(f"saved {membership.save_current_snapshot()} rows of today's NIFTY 500 list")
 
 
 @app.command("membership-fetch")
@@ -347,16 +347,15 @@ def fundamentals_snapshot(
     from .data import fundamentals as fund
 
     cfg = load_config()
-    fdir = cfg.data_dir / "fundamentals"
-    last = fund.latest_snapshot_date(fdir)
+    last = fund.latest_snapshot_date()
     today = pd.Timestamp(fund.ist_today())
     if if_stale_days and last is not None and (today - last).days < if_stale_days:
         typer.echo(f"newest snapshot {last.date()} is {(today - last).days}d old (< {if_stale_days}); skipping")
         return
-    syms = list(inst.load_instruments(cfg.data_dir)["symbol"])
+    syms = list(inst.load_instruments()["symbol"])
     syms = syms[:limit] if limit else syms
-    path, n, failed = fund.snapshot(fdir, syms)
-    typer.echo(f"{n}/{len(syms)} saved to {path}")
+    day, n, failed = fund.snapshot(syms)
+    typer.echo(f"{n}/{len(syms)} saved as snapshot {day}")
     if failed:
         typer.echo(f"{len(failed)} failed: {', '.join(failed[:40])}{' ...' if len(failed) > 40 else ''}")
 
@@ -370,7 +369,7 @@ def research_eval(
     from .research import evaluate
 
     cfg = load_config()
-    res = evaluate.evaluate(cfg, inst.load_instruments(cfg.data_dir), slug, record=True, counted=not recheck)
+    res = evaluate.evaluate(cfg, inst.load_instruments(), slug, record=True, counted=not recheck)
     typer.echo(res.summary_md)
     typer.echo(f"VERDICT: {res.verdict}  (reports/research/{slug}/summary.md)")
     if res.verdict in ("PASS", "FORWARD_ONLY"):
@@ -383,7 +382,7 @@ def research_promote(slug: str = typer.Argument(...)) -> None:
     from . import paper
 
     cfg = load_config()
-    e = paper.promote_candidate(cfg, inst.load_instruments(cfg.data_dir), slug)
+    e = paper.promote_candidate(cfg, inst.load_instruments(), slug)
     typer.echo(f"{slug} promoted ({e['tier']}): forward paper sleeve from {e['start']}, capital {e['capital']:,.0f}, "
                f"frozen params {e['params']}. Paper only; its backtest is not evidence.")
 
@@ -409,8 +408,8 @@ def research_status() -> None:
     from .research import registry
 
     cfg = load_config()
-    last_bar = store.load(cfg.candles_dir, BENCHMARK).index.max()
-    snap = fund.latest_snapshot_date(cfg.data_dir / "fundamentals")
+    last_bar = store.load(BENCHMARK).index.max()
+    snap = fund.latest_snapshot_date()
     typer.echo(f"last candle bar: {last_bar.date()} | last completed session: {store.last_complete_day()} "
                f"| newest fundamentals snapshot: {snap.date() if snap is not None else 'none'}")
     typer.echo(f"counted trials so far: {registry.trial_count(cfg)}")
@@ -433,8 +432,8 @@ def market_context_cmd() -> None:
     from .research import context
 
     cfg = load_config()
-    bench = store.load(cfg.candles_dir, BENCHMARK)["close"]
-    prep = mom.prepare(cfg, inst.load_instruments(cfg.data_dir), None)
+    bench = store.load(BENCHMARK)["close"]
+    prep = mom.prepare(cfg, inst.load_instruments(), None)
     typer.echo(context.render(context.market_context(bench, prep)))
     typer.echo("\nInformational only: it never changes the gates, the grid, or which idea is tested.")
 

@@ -3,6 +3,7 @@ import pandas as pd
 import pytest
 
 from trader import backtest as bt
+from helpers import patch_candles
 from trader.config import Config
 from trader.data import store
 from trader.strategies import ALL, features
@@ -43,7 +44,7 @@ def test_strategies_actually_fire():
 def synth_backtest(monkeypatch):
     frames = {f"S{i}": synth(500, seed=i) for i in range(8)}
     frames["NIFTY500"] = synth(500, seed=99, drift=0.0004)
-    monkeypatch.setattr(store, "load", lambda d, s: frames.get(s))
+    patch_candles(monkeypatch, frames)
     inst = pd.DataFrame({"symbol": [k for k in frames if k != "NIFTY500"], "sector": ["A", "A", "B", "B", "C", "C", "D", "D"]})
     cfg = Config(capital=1_000_000)
     strats = {n: ALL[n]() for n in ALL}

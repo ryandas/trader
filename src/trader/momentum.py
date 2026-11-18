@@ -78,7 +78,6 @@ class MomPrep:
     close_df: pd.DataFrame
     _scores: dict = field(default_factory=dict)
     rebal_w: np.ndarray | None = None  # True on the last trading day of a week
-    fund_dir: object = None  # directory of dated fundamentals snapshots (None = no fundamentals)
     _fund: dict = field(default_factory=dict)
     bench_close: np.ndarray | None = None  # NIFTY 500 close on each date (forward-filled), for market-relative scores
     sectors: list | None = None  # sector label per symbol (same order as syms)
@@ -112,7 +111,7 @@ class MomPrep:
         if field_name not in self._fund:
             from .data import fundamentals
 
-            self._fund[field_name] = fundamentals.panel(self.fund_dir, self.dates, self.syms, field_name)
+            self._fund[field_name] = fundamentals.panel(self.dates, self.syms, field_name)
         return self._fund[field_name]
 
 
@@ -132,7 +131,7 @@ def truncate(prep: MomPrep, t: int) -> MomPrep:
     return MomPrep(
         prep.dates[:k], prep.syms, prep.o[:k], prep.c[:k], prep.liquid[:k], prep.above200[:k], prep.mkt[:k],
         prep.rebal[:k], prep.close_df.iloc[:k],
-        rebal_w=None if prep.rebal_w is None else prep.rebal_w[:k], fund_dir=prep.fund_dir,
+        rebal_w=None if prep.rebal_w is None else prep.rebal_w[:k],
         bench_close=None if prep.bench_close is None else prep.bench_close[:k], sectors=prep.sectors,
         rebal_q=None if prep.rebal_q is None else prep.rebal_q[:k], rebal_s=None if prep.rebal_s is None else prep.rebal_s[:k],
     )
@@ -149,13 +148,9 @@ def prepare(cfg: Config, instruments: pd.DataFrame, liquid_top: int | None = Non
 
     symbols = list(instruments["symbol"])
     if pit:
-        symbols += [s for s in membership.all_symbols(cfg.data_dir) if s not in set(symbols)]
-    frames = {}
-    for sym in symbols:
-        df = store.load(cfg.candles_dir, sym)
-        if df is not None and len(df) >= cfg.universe.min_bars:
-            frames[sym] = df
-    bench = store.load(cfg.candles_dir, BENCHMARK)
+        symbols += [s for s in membership.all_symbols() if s not in set(symbols)]
+    frames = {sym: df for sym, df in store.load_many(symbols).items() if len(df) >= cfg.universe.min_bars}
+    bench = store.load(BENCHMARK)
     if not frames or bench is None:
         raise SystemExit("No candle data or benchmark. Run `trader update` first.")
     dates = pd.DatetimeIndex(sorted(set().union(*[f.index for f in frames.values()])))
@@ -165,7 +160,7 @@ def prepare(cfg: Config, instruments: pd.DataFrame, liquid_top: int | None = Non
     value_cr = (close * raw("volume").fillna(0)).rolling(20, min_periods=20).median() / 1e7
     liquid = ((value_cr >= cfg.universe.min_median_value_cr) & (close >= cfg.universe.min_price))
     if pit:
-        liquid = liquid & pd.DataFrame(membership.member_panel(cfg.data_dir, dates, syms), index=dates, columns=syms)
+        liquid = liquid & pd.DataFrame(membership.member_panel(dates, syms), index=dates, columns=syms)
     if liquid_top:
         vr = value_cr.where(liquid).rank(axis=1, ascending=False, method="first")
         liquid = liquid & (vr <= liquid_top)
@@ -190,7 +185,7 @@ def prepare(cfg: Config, instruments: pd.DataFrame, liquid_top: int | None = Non
     return MomPrep(
         dates, syms, raw("open").to_numpy(), close.to_numpy(),
         liquid.to_numpy(dtype=bool), above200.to_numpy(dtype=bool), mkt, rebal, close,
-        rebal_w=rebal_w, fund_dir=cfg.data_dir / "fundamentals", rebal_q=rebal_q, rebal_s=rebal_s,
+        rebal_w=rebal_w, rebal_q=rebal_q, rebal_s=rebal_s,
         bench_close=bench["close"].reindex(dates).ffill().to_numpy(),
         sectors=(instruments.set_index("symbol")["sector"].reindex(syms).fillna("Unknown").tolist() if "sector" in instruments else None),
     )
@@ -353,7 +348,7 @@ def walk_forward(cfg: Config, prep: MomPrep, grid: list[MomParams] | None = None
     With `contribution` every window is a FRESH START: `cfg.capital` plus the monthly deposit, so each OOS year looks like
     the first year of a new small account (its equity is time-weighted, see `run`)."""
     grid = GRID if grid is None else grid
-    bench = store.load(cfg.candles_dir, BENCHMARK)["close"]
+    bench = store.load(BENCHMARK)["close"]
     folds, chosen_eq, chosen_tr = [], [], []
     grid_eq: dict[int, list] = {i: [] for i in range(len(grid))}
     for is_s, is_e, oos_s, oos_e in wf.fold_windows(prep.dates):

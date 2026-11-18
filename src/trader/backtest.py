@@ -97,13 +97,12 @@ def prepare(
     """Compute features and candidate signals once. `filters` enables the top-N relative-strength
     universe and the regime/selector eligibility rules (False = the step-3 baseline)."""
     frames: dict[str, pd.DataFrame] = {}
-    for row in instruments.itertuples():
-        df = store.load(cfg.candles_dir, row.symbol)
-        if df is not None and len(df) >= cfg.universe.min_bars:
-            frames[row.symbol] = df
+    for sym, df in store.load_many(list(instruments["symbol"])).items():
+        if len(df) >= cfg.universe.min_bars:
+            frames[sym] = df
     if not frames:
         raise SystemExit("No candle data found. Run `trader update` first.")
-    bench = store.load(cfg.candles_dir, BENCHMARK)
+    bench = store.load(BENCHMARK)
     if bench is None:
         raise SystemExit("Benchmark missing. Run `trader update` (without symbols) first.")
     dates = pd.DatetimeIndex(sorted(set().union(*[f.index for f in frames.values()])))
@@ -320,5 +319,5 @@ def run(
 
 
 def load_benchmark(cfg: Config) -> pd.Series | None:
-    df = store.load(cfg.candles_dir, BENCHMARK)
+    df = store.load(BENCHMARK)
     return df["close"] if df is not None else None

@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from trader import backtest as bt
+from helpers import patch_candles
 from trader import paper
 from trader.config import Config
 from trader.data import store
@@ -16,7 +17,7 @@ from test_strategies_backtest import synth
 def world(monkeypatch, tmp_path):
     frames = {f"S{i}": synth(600, seed=i) for i in range(8)}
     frames["NIFTY500"] = synth(600, seed=99, drift=0.0004)
-    monkeypatch.setattr(store, "load", lambda d, s: frames.get(s))
+    patch_candles(monkeypatch, frames)
     monkeypatch.setattr(Config, "data_dir", property(lambda self: tmp_path))
     inst = pd.DataFrame({"symbol": [f"S{i}" for i in range(8)], "sector": list("AABBCCDD")})
     (tmp_path / "params.json").write_text(json.dumps(
