@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
 # Scheduled idea testing: runs the /research loop for ONE idea with Claude Code (print mode).
+# Hermes cron: Mon-Fri 18:30 Asia/Kolkata (after the 16:30 paper run and its data refresh). Skips NSE holidays.
 # Paper only. Promotion, retirement, pushes and order tools are blocked by the tool allowlist.
 # Stdout is the Telegram message. Commits locally when something changed; never pushes.
 # Set DRY_RUN=1 to print the command and prompt size without running Claude (no trial counted).
 set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HOLIDAYS="${TRADER_HOLIDAYS_FILE:-$SCRIPT_DIR/nse_holidays_2026.txt}"
 REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOG_DIR="${TRADER_LOG_DIR:-${TMPDIR:-/tmp}/trader-logs}"
 GUARDED=(src/trader/research/evaluate.py src/trader/research/dsr.py)
 
+today_ist=$(TZ=Asia/Kolkata date +%Y-%m-%d)
+if grep -qx "$today_ist" "$HOLIDAYS" 2>/dev/null; then
+  exit 0   # NSE holiday: no new data, nothing to test; silent skip
+fi
+
 cd "$REPO" || { echo "FAILED: trader repo missing ($REPO)"; exit 1; }
 mkdir -p "$LOG_DIR" reports/research
 stamp="$(date -u +%Y%m%dT%H%M)"
-out="$LOG_DIR/research_weekly_${stamp}.json"
-err="$LOG_DIR/research_weekly_${stamp}.err"
+out="$LOG_DIR/research_daily_${stamp}.json"
+err="$LOG_DIR/research_daily_${stamp}.err"
 
 
 if [ -n "$(git status --porcelain)" ]; then
@@ -26,7 +33,7 @@ prompt_file="$(mktemp "$LOG_DIR/research_prompt_XXXX.md")"
 {
   # /research command body without its frontmatter, with $ARGUMENTS fixed to 1
   awk 'BEGIN{c=0} /^---$/ && c<2 {c++; next} c>=2' .claude/commands/research.md | sed 's/\$ARGUMENTS/1/g'
-  cat "$SCRIPT_DIR/research_weekly_prompt.md"
+  cat "$SCRIPT_DIR/research_daily_prompt.md"
 } > "$prompt_file"
 
 allowed="Read,Write,Edit,WebSearch,WebFetch,Bash(uv run pytest *),Bash(uv run trader research-eval *),Bash(uv run trader research-status *),Bash(uv run trader market-context *),Bash(uv run trader update *),Bash(uv run trader fundamentals-snapshot *),Bash(git status *),Bash(git diff *),Bash(git log *),Bash(ls *),Bash(cat *),Bash(sha256sum *)"
@@ -69,7 +76,7 @@ if [ -n "$(git status --porcelain -- research src/trader/research tests)" ]; the
   slug="$(sed -n 's/^Idea: \([^ ]*\).*/\1/p' "$summary" | head -n1)"
   verdict="$(sed -n 's/^Verdict: //p' "$summary" | head -n1)"
   git commit -q -m "research: scheduled trial ${slug:-unknown} (${verdict:-unknown})" \
-    -m "Automated weekly run (scripts/research_weekly.sh). Not pushed." && echo "committed locally: $(git log --oneline -1)"
+    -m "Automated daily run (scripts/research_daily.sh). Not pushed." && echo "committed locally: $(git log --oneline -1)"
 else
   echo "no repo changes to commit"
 fi
