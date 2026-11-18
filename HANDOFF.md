@@ -30,6 +30,7 @@ Both scripts read every `scripts/nse_holidays_<year>.txt` (one `YYYY-MM-DD` per 
 ## Moving to a new Hermes host
 
 1. Old host: `scripts/handoff_pack.sh [OUT_DIR] [--with-candles]` writes `trader-state-<stamp>.tar.gz` (consistent SQLite backups of `paper.db` and `research.db`, params, membership, fundamentals, `config.yaml`, git HEAD; no `.env`; candles only with the flag, otherwise `trader update` refetches them).
+Both `handoff_pack.sh` and `handoff_check.sh` run `scripts/trial_guard.sh`, which compares the counted trials in `data/research.db` with the newest trial number in the committed journals. A mismatch means the db is stale or from another host: the pack refuses (override with `--force`) and the check fails. Always pack from the host that runs the research job.
 2. New host: clone the repo (or copy it; `git log` has the research history), `tar -xzf <pack> -C <repo>`, install `uv` (and the `claude` CLI for the research job), then `scripts/handoff_check.sh` (add `--quick` to skip tests). It prints `READY` or lists failures.
 3. Create the two Hermes cron jobs (timezone Asia/Kolkata, Mon-Fri): `16:30` runs `scripts/trader_daily.sh`; `18:30` runs `scripts/research_daily.sh`. Stdout of each is the Telegram message; empty stdout sends nothing.
 4. Do not run `paper-momentum --reset` or `research-promote` on the new host: the ledger is a replay from frozen params in `paper.db`. Only one host should run the jobs, otherwise two ledgers and two trial counts diverge.

@@ -18,6 +18,7 @@ command -v sqlite3 >/dev/null && ok "sqlite3 (needed only for handoff_pack.sh)" 
 [ -f data/paper.db ] && ok "data/paper.db present" || bad "data/paper.db missing: restore the state pack (do NOT run paper-momentum --reset)"
 [ -f data/research.db ] && ok "data/research.db present" || warn "data/research.db missing: trial count would restart (deflated-Sharpe bar resets)"
 [ -f data/instruments.csv ] && ok "data/instruments.csv present" || bad "data/instruments.csv missing: uv run trader init"
+msg="$(scripts/trial_guard.sh)" && ok "$msg" || bad "$msg"
 ls data/candles/*.parquet >/dev/null 2>&1 && ok "candles present" || warn "no candles: first daily run will backfill 10y (slow)"
 ls scripts/nse_holidays_"$(TZ=Asia/Kolkata date +%Y)".txt >/dev/null 2>&1 \
   && ok "holiday list for $(TZ=Asia/Kolkata date +%Y)" || bad "no scripts/nse_holidays_$(TZ=Asia/Kolkata date +%Y).txt"

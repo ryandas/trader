@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pack the gitignored state needed to run the trader on another host (Hermes).
-# Usage: scripts/handoff_pack.sh [OUT_DIR] [--with-candles]
+# Usage: scripts/handoff_pack.sh [OUT_DIR] [--with-candles] [--force]   (--force packs despite a trial-guard mismatch)
 # Produces OUT_DIR/trader-state-<UTC stamp>.tar.gz (default OUT_DIR: $TMPDIR or /tmp). Candles (~60 MB) are
 # refetchable with `uv run trader update`, so they are left out unless --with-candles is given.
 # SQLite files are copied with .backup (consistent even if a run is in progress). .env is NEVER packed.
@@ -8,8 +8,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 out_dir="${TMPDIR:-/tmp}"; with_candles=0
-for a in "$@"; do case "$a" in --with-candles) with_candles=1 ;; *) out_dir="$a" ;; esac; done
+force=0
+for a in "$@"; do case "$a" in --with-candles) with_candles=1 ;; --force) force=1 ;; *) out_dir="$a" ;; esac; done
 cd "$REPO"
+if ! "$SCRIPT_DIR/trial_guard.sh"; then
+  [ "$force" = 1 ] && echo "--force given: packing anyway" || { echo "Refusing to pack a research.db that disagrees with the journals (override with --force)."; exit 1; }
+fi
 stage="$(mktemp -d)"; trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/data" "$out_dir"
 for db in paper.db research.db; do
