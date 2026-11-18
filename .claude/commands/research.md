@@ -46,7 +46,7 @@ Steps:
    worth testing today" is a valid outcome. Check the citation of the idea you pick.
 3. Write `src/trader/research/candidates/<slug>.py` following the contract in `src/trader/research/registry.py`
    (`META` with slug, kind="rotation", hypothesis, source, grid; `score(prep, **params)`, higher = buy, using only
-   data up to each row's date). Look at `low_vol.py` for the shape. Engine knobs in a grid point (`top_n`, `buffer`,
+   data up to each row's date). Look at `int_mom.py` for the shape. Engine knobs in a grid point (`top_n`, `buffer`,
    `bear_exit`, `rebalance`) configure the rotation; every other key goes to `score`. Fundamentals ideas set
    `uses_fundamentals: True`, a single grid point, and read `prep.fund_panel("<field>")`.
    Add a unit test for the scoring logic in `tests/test_research.py` (or a new test file).
