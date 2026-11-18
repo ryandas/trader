@@ -10,7 +10,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOLIDAYS="${TRADER_HOLIDAYS_FILE:-$SCRIPT_DIR/nse_holidays_2026.txt}"
 REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOG_DIR="${TRADER_LOG_DIR:-${TMPDIR:-/tmp}/trader-logs}"
-GUARDED=(src/trader/research/evaluate.py src/trader/research/dsr.py)
+# Guard policy (applied after the run). Tracked files are restored unless they match TRACKED_OK_RE.
+TRACKED_OK_RE='^(research/backlog\.md|research/india_evidence\.md|research/journal/.*)$'
+# Untracked files are kept (and committed) only if they match UNTRACKED_OK_RE.
+UNTRACKED_OK_RE='^(research/journal/.*|src/trader/research/candidates/.*|tests/test_[^/]*\.py)$'
 
 today_ist=$(TZ=Asia/Kolkata date +%Y-%m-%d)
 if grep -qx "$today_ist" "$HOLIDAYS" 2>/dev/null; then
@@ -36,32 +39,55 @@ prompt_file="$(mktemp "$LOG_DIR/research_prompt_XXXX.md")"
   cat "$SCRIPT_DIR/research_daily_prompt.md"
 } > "$prompt_file"
 
-allowed="Read,Write,Edit,WebSearch,WebFetch,Bash(uv run pytest *),Bash(uv run trader research-eval *),Bash(uv run trader research-status *),Bash(uv run trader market-context *),Bash(uv run trader update *),Bash(uv run trader fundamentals-snapshot *),Bash(git status *),Bash(git diff *),Bash(git log *),Bash(ls *),Bash(cat *),Bash(sha256sum *)"
-denied="Bash(uv run trader research-promote *),Bash(uv run trader research-retire *),Bash(uv run trader paper-*),Bash(uv run trader daily *),Bash(git push *),Bash(git commit *),Bash(git reset *),Bash(git checkout *),Bash(rm *),mcp__dhan__*"
+# Path rules use Claude Code's gitignore-style permission syntax, relative to the working directory
+# (the repo root, we cd there above). Edit(...) rules cover all file-editing tools; Write(...) is listed too.
+allowed="Read,WebSearch,WebFetch"
+for pat in "research/**" "src/trader/research/candidates/**" "reports/research/**" "tests/test_*.py"; do
+  allowed+=",Edit($pat),Write($pat)"
+done
+allowed+=",Bash(uv run pytest *),Bash(uv run trader research-eval *),Bash(uv run trader research-status *),Bash(uv run trader market-context *),Bash(uv run trader update *),Bash(uv run trader fundamentals-snapshot *),Bash(git status *),Bash(git diff *),Bash(git log *),Bash(sha256sum *)"
+denied="Read(.env),Read(.env.*),Read(**/.env*),Edit(.env*),Write(.env*),Bash(cat *),Bash(ls *),Bash(head *),Bash(tail *),Bash(grep *),Bash(find *),Bash(env*),Bash(printenv*),Bash(uv run trader research-promote *),Bash(uv run trader research-retire *),Bash(uv run trader paper-*),Bash(uv run trader daily *),Bash(git push *),Bash(git commit *),Bash(git reset *),Bash(git checkout *),Bash(rm *),mcp__dhan__*"
 
 if [ "${DRY_RUN:-0}" = "1" ]; then
   echo "DRY RUN. prompt bytes: $(wc -c < "$prompt_file"), prompt file: $prompt_file"
   echo "claude version: $(claude --version 2>&1)"
   echo "allowed: $allowed"
   echo "denied: $denied"
+  echo "guard keeps tracked changes only for: $TRACKED_OK_RE"
+  echo "guard keeps untracked files only for: $UNTRACKED_OK_RE"
   exit 0
 fi
 
 rm -f reports/research/last_run.txt
-before="$(sha256sum "${GUARDED[@]}" | sha256sum)"
-timeout 3000 claude -p "$(cat "$prompt_file")" \
+# Run from the repo root without the Dhan credentials in the environment.
+env -u DHAN_CLIENT_ID -u DHAN_ACCESS_TOKEN timeout 3000 claude -p "$(cat "$prompt_file")" \
   --allowedTools "$allowed" \
   --disallowedTools "$denied" \
   --max-turns 60 --output-format json >"$out" 2>"$err"
 rc=$?
 rm -f "$prompt_file"
 
-# Guard: the gates must not change during a run. Restore them and report if they did.
-after="$(sha256sum "${GUARDED[@]}" | sha256sum)"
-if [ "$before" != "$after" ]; then
-  git checkout -- "${GUARDED[@]}"
-  echo "WARNING: gate files changed during the run and were restored from git. Investigate before trusting this run."
-fi
+# Guard (a): any change to a tracked file outside the allowed research notes is reverted.
+# Covers evaluate.py, dsr.py, registry.py, metrics.py, momentum.py, walkforward.py, config.yaml,
+# scripts/, tests/ and already-committed candidates.
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  if ! [[ "$f" =~ $TRACKED_OK_RE ]]; then
+    git checkout -- "$f"
+    echo "WARNING: tracked file changed during the run and was restored from git: $f"
+  fi
+done < <(git diff --name-only)
+
+# Guard (b): untracked files are kept only in allowed places; the rest are listed and not committed.
+keep_untracked=()
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  if [[ "$f" =~ $UNTRACKED_OK_RE ]]; then
+    keep_untracked+=("$f")
+  else
+    echo "WARNING: unexpected untracked file left uncommitted: $f"
+  fi
+done < <(git ls-files --others --exclude-standard)
 
 summary="reports/research/last_run.txt"
 if [ "$rc" -ne 0 ] || [ ! -s "$summary" ]; then
@@ -71,8 +97,13 @@ if [ "$rc" -ne 0 ] || [ ! -s "$summary" ]; then
 fi
 cat "$summary"
 
-if [ -n "$(git status --porcelain -- research src/trader/research tests)" ]; then
-  git add research src/trader/research tests
+# Guard (c): commit only explicitly allowed paths, never `git add -A`.
+commit_paths=(${keep_untracked[@]+"${keep_untracked[@]}"})
+while IFS= read -r f; do
+  [ -n "$f" ] && commit_paths+=("$f")   # tracked leftovers all match TRACKED_OK_RE after guard (a)
+done < <(git diff --name-only)
+if [ "${#commit_paths[@]}" -gt 0 ]; then
+  git add -- "${commit_paths[@]}"
   slug="$(sed -n 's/^Idea: \([^ ]*\).*/\1/p' "$summary" | head -n1)"
   verdict="$(sed -n 's/^Verdict: //p' "$summary" | head -n1)"
   git commit -q -m "research: scheduled trial ${slug:-unknown} (${verdict:-unknown})" \

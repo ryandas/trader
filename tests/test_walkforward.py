@@ -29,6 +29,15 @@ def test_chain_carries_equity_forward():
     assert c["equity"].tolist() == pytest.approx([100.0, 110.0, 110.0, 99.0])
 
 
+def test_chain_keeps_first_day_return_of_each_fold():
+    # both folds start from 100 and earn +10% on their first day, then are flat
+    a = pd.DataFrame({"equity": [110.0, 110.0]}, index=pd.to_datetime(["2020-01-01", "2020-12-31"]))
+    b = pd.DataFrame({"equity": [110.0, 110.0]}, index=pd.to_datetime(["2021-01-01", "2021-12-31"]))
+    c = wf._chain([a, b], 100.0)
+    # old code rescaled each fold to start at the carried level, giving [100, 100, 110, 110]
+    assert c["equity"].tolist() == pytest.approx([110.0, 110.0, 121.0, 121.0])
+
+
 def test_grid_keys_and_defaults():
     g = wf.build_grid()
     for name in wf.GRIDS:

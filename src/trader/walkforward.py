@@ -104,11 +104,15 @@ class WFResult:
 
 
 def _chain(parts: list[pd.DataFrame], capital: float) -> pd.DataFrame:
-    """Join per-fold equity curves, carrying the ending equity into the next fold."""
+    """Join per-fold equity curves, carrying the ending equity into the next fold.
+
+    Every fold's curve is a fresh start from `capital`, so its first row already includes day-1's return."""
     out, level = [], capital
     for p in parts:
         scaled = p.copy()
-        scaled["equity"] = p["equity"] / p["equity"].iloc[0] * level
+        # Each fold's curve starts from its own capital at the open of day 1, so its first-day
+        # return is equity[0] / capital - 1. Scale by level / capital to keep that return.
+        scaled["equity"] = p["equity"] / capital * level
         level = scaled["equity"].iloc[-1]
         out.append(scaled)
     return pd.concat(out)

@@ -39,6 +39,16 @@ def _fetch(source: CandleSource, symbol, security_id, start: date, end: date) ->
     return pd.concat(frames) if frames else pd.DataFrame()
 
 
+def _differs(a: pd.DataFrame, b: pd.DataFrame) -> bool:
+    """True if the frames differ in index, columns or values (dtype-insensitive, NaN == NaN)."""
+    if not a.index.equals(b.index) or list(a.columns) != list(b.columns):
+        return True
+    try:
+        return not a.astype("float64").equals(b.astype("float64"))
+    except (TypeError, ValueError):
+        return not a.equals(b)
+
+
 def update_symbol(
     source: CandleSource,
     candles_dir: Path,
@@ -79,6 +89,6 @@ def update_symbol(
     merged = new if old is None else pd.concat([old, new])
     merged = merged[~merged.index.duplicated(keep="last")].sort_index()
     before = 0 if old is None else len(old)
-    if len(merged) != before or old is None:
+    if old is None or len(merged) != before or _differs(merged, old):
         merged.to_parquet(_path(candles_dir, symbol))
     return len(merged) - before
