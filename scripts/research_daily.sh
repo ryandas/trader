@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Scheduled idea testing: runs the /research loop for ONE idea with Claude Code (print mode).
 # Hermes cron: Mon-Fri 18:30 Asia/Kolkata (after the 16:30 paper run and its data refresh). Skips NSE holidays.
+# All data lives in Postgres (POSTGRES_* in .env); each run is also stored in job_runs.
 # Paper only. Promotion, retirement, pushes and order tools are blocked by the tool allowlist.
 # Stdout is the Telegram message. Commits locally when something changed; never pushes.
 # Set DRY_RUN=1 to print the command and prompt size without running Claude (no trial counted).
@@ -26,6 +27,12 @@ mkdir -p "$LOG_DIR" reports/research
 stamp="$(date -u +%Y%m%dT%H%M)"
 out="$LOG_DIR/research_daily_${stamp}.json"
 err="$LOG_DIR/research_daily_${stamp}.err"
+started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# Store the run's message and log in job_runs; a failure to log never changes the outcome.
+log_run() {  # exit_code [message_file] [log_file]
+  uv run trader db log-run --job research --exit "$1" ${2:+--message-file "$2"} ${3:+--log-file "$3"} --started "$started" \
+    >/dev/null 2>&1 || echo "⚠️ run not logged to the database"
+}
 
 
 if [ -n "$(git status --porcelain)" ]; then
@@ -46,8 +53,8 @@ allowed="Read,WebSearch,WebFetch"
 for pat in "research/**" "src/trader/research/candidates/**" "reports/research/**" "tests/test_*.py"; do
   allowed+=",Edit($pat),Write($pat)"
 done
-allowed+=",Bash(uv run pytest *),Bash(uv run trader research-eval *),Bash(uv run trader research-status *),Bash(uv run trader market-context *),Bash(uv run trader update *),Bash(uv run trader fundamentals-snapshot *),Bash(git status *),Bash(git diff *),Bash(git log *),Bash(sha256sum *)"
-denied="Read(.env),Read(.env.*),Read(**/.env*),Edit(.env*),Write(.env*),Bash(cat *),Bash(ls *),Bash(head *),Bash(tail *),Bash(grep *),Bash(find *),Bash(env*),Bash(printenv*),Bash(uv run trader research-promote *),Bash(uv run trader research-retire *),Bash(uv run trader paper-*),Bash(uv run trader daily *),Bash(git push *),Bash(git commit *),Bash(git reset *),Bash(git checkout *),Bash(rm *),mcp__dhan__*"
+allowed+=",Bash(uv run pytest *),Bash(uv run trader research-eval *),Bash(uv run trader research-status *),Bash(uv run trader show *),Bash(uv run trader market-context *),Bash(uv run trader update *),Bash(uv run trader fundamentals-snapshot *),Bash(git status *),Bash(git diff *),Bash(git log *),Bash(sha256sum *)"
+denied="Read(.env),Read(.env.*),Read(**/.env*),Edit(.env*),Write(.env*),Bash(cat *),Bash(ls *),Bash(head *),Bash(tail *),Bash(grep *),Bash(find *),Bash(env*),Bash(printenv*),Bash(uv run trader research-promote *),Bash(uv run trader research-retire *),Bash(uv run trader paper-*),Bash(uv run trader db migrate-local *),Bash(uv run trader daily *),Bash(git push *),Bash(git commit *),Bash(git reset *),Bash(git checkout *),Bash(rm *),mcp__dhan__*"
 
 if [ "${DRY_RUN:-0}" = "1" ]; then
   echo "DRY RUN. prompt bytes: $(wc -c < "$prompt_file"), prompt file: $prompt_file"
@@ -94,10 +101,12 @@ summary="reports/research/last_run.txt"
 if [ "$rc" -ne 0 ] || [ ! -s "$summary" ]; then
   echo "FAILED: research run exit=$rc (no summary written). Log: $out / $err"
   [ -s "$err" ] && tail -n 20 "$err"
+  log_run "${rc:-1}" "" "$out"
   exit 1
 fi
 # Telegram-ready summary (stdout is the message). Falls back to the raw summary if the formatter fails.
 uv run python "$SCRIPT_DIR/format_research_message.py" "$summary" 2>/dev/null || cat "$summary"
+log_run 0 "$summary" "$out"
 
 # Guard (c): commit only explicitly allowed paths, never `git add -A`.
 commit_paths=(${keep_untracked[@]+"${keep_untracked[@]}"})
