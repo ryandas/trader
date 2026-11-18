@@ -115,6 +115,8 @@ def _trials(data: Path) -> int:
 
 
 def _read_csv(p: Path, **kw) -> pd.DataFrame:
+    if not p.read_text().strip():  # e.g. an orders file with no orders: no header either
+        return pd.DataFrame()
     return pd.read_csv(p, **kw)
 
 
