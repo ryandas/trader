@@ -37,15 +37,29 @@ def update(
     total = 0
     if not symbols:  # refresh the benchmark index alongside the full universe
         store.update_symbol(src, cfg.candles_dir, BENCHMARK, 0, cfg.history_years)
-    try:
-        for i, row in enumerate(df.itertuples(), 1):
+    from . import sessions
+
+    target = sessions.last_session_on_or_before(store.last_complete_day())
+    not_updated: list[str] = []
+    for i, row in enumerate(df.itertuples(), 1):
+        try:
             n = store.update_symbol(
                 src, cfg.candles_dir, row.symbol, row.security_id, cfg.history_years
             )
-            total += n
-            typer.echo(f"[{i}/{len(df)}] {row.symbol}: +{n}")
-    except DhanAuthError as e:
-        raise SystemExit(str(e))
+        except DhanAuthError as e:
+            raise SystemExit(str(e))
+        except Exception as e:  # one bad symbol must not abort the whole refresh
+            typer.echo(f"[{i}/{len(df)}] {row.symbol}: ERROR {type(e).__name__}: {e}")
+            not_updated.append(row.symbol)
+            continue
+        total += n
+        typer.echo(f"[{i}/{len(df)}] {row.symbol}: +{n}")
+        if n == 0:
+            have = store.load(cfg.candles_dir, row.symbol)
+            if have is None or not len(have) or have.index.max().date() < target:
+                not_updated.append(row.symbol)
+    if not_updated:
+        typer.echo(f"WARNING: {len(not_updated)} symbols not updated: {', '.join(not_updated[:10])}")
     typer.echo(f"done, {total} new rows")
 
 
@@ -224,6 +238,10 @@ def daily(
     typer.echo(f"report: {md}\norders: {csv}")
     if st.stale:
         typer.echo("WARNING: data looks stale; run `trader update`.")
+    from . import sessions
+
+    if w := sessions.holiday_list_warning():
+        typer.echo(w)
 
 
 @app.command()
@@ -331,7 +349,7 @@ def fundamentals_snapshot(
     cfg = load_config()
     fdir = cfg.data_dir / "fundamentals"
     last = fund.latest_snapshot_date(fdir)
-    today = pd.Timestamp.today().normalize()
+    today = pd.Timestamp(fund.ist_today())
     if if_stale_days and last is not None and (today - last).days < if_stale_days:
         typer.echo(f"newest snapshot {last.date()} is {(today - last).days}d old (< {if_stale_days}); skipping")
         return

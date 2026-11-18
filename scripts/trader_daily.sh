@@ -22,8 +22,13 @@ echo "Trader daily paper run $(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M IST')"
 
 if timeout 1500 uv run trader daily >"$log" 2>&1; then
   # Telegram-ready summary: labelled sections, built from the lines `trader daily` echoes.
-  python3 "$SCRIPT_DIR/format_daily_message.py" "$log"
-  echo "✅ Run OK · log: $log"
+  if uv run python "$SCRIPT_DIR/format_daily_message.py" "$log"; then
+    echo "✅ Run OK · log: $log"
+  else
+    echo "⚠️ message formatter failed; raw summary below"
+    grep -E '^(WARNING|momentum sleeve|swing sleeve|candidate |report: |orders: |[0-9]{4}-[0-9]{2}-[0-9]{2} \|)' "$log"
+    echo "✅ Run OK · log: $log"
+  fi
 else
   echo "❌ Trader daily run FAILED (exit non-zero). Last 40 log lines:"
   tail -n 40 "$log"

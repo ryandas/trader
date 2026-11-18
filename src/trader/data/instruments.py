@@ -8,6 +8,7 @@ import pandas as pd
 
 NIFTY500_URL = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
 SCRIP_MASTER_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
+MIN_ROWS = 400
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 
@@ -29,11 +30,17 @@ def build_instruments(data_dir: Path) -> pd.DataFrame:
     ][["SEM_TRADING_SYMBOL", "SEM_SMST_SECURITY_ID"]]
     eq.columns = ["symbol", "security_id"]
     out = n500.merge(eq, on="symbol", how="left")
+    dups = int(out["symbol"].duplicated().sum())
+    if dups:
+        print(f"warning: {dups} duplicate symbol rows dropped (kept first)")
+        out = out.drop_duplicates("symbol", keep="first")
     missing = out[out["security_id"].isna()]["symbol"].tolist()
     if missing:
         print(f"warning: {len(missing)} symbols without a Dhan securityId: {missing[:10]}")
     out = out.dropna(subset=["security_id"])
     out["security_id"] = out["security_id"].astype(int)
+    if len(out) < MIN_ROWS:
+        raise ValueError(f"only {len(out)} instruments (< {MIN_ROWS}); refusing to overwrite instruments.csv")
     data_dir.mkdir(parents=True, exist_ok=True)
     out.to_csv(data_dir / "instruments.csv", index=False)
     return out

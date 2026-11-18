@@ -15,8 +15,17 @@ def money(s: str) -> str:
     return "₹" + s.strip()
 
 
-def main() -> int:
-    log = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace").splitlines()
+def esc(s: str) -> str:
+    """Escape Telegram (legacy) Markdown specials in dynamic text so the message is not rejected."""
+    return re.sub(r"([_*`\[])", r"\\\1", s)
+
+
+def main(argv: list[str] | None = None) -> int:
+    from trader.config import load_config
+
+    top_n = load_config().momentum.top_n
+    argv = sys.argv if argv is None else argv
+    log = Path(argv[1]).read_text(encoding="utf-8", errors="replace").splitlines()
     date_line = regime = momentum = report = orders_csv = None
     candidates, warnings, swing = [], [], None
     for line in log:
@@ -56,33 +65,33 @@ def main() -> int:
             out.append(f"• Value {money(value)} · paid in {money(paid)}")
             if gain is not None:
                 out.append(f"• P&L so far {'+' if gain >= 0 else '−'}{money(f'{abs(gain):,.0f}')}")
-            out.append(f"• Holdings {holdings}/10")
+            out.append(f"• Holdings {holdings}/{top_n}")
             if int(sells) or int(buys):
                 out.append(f"• Next session: 🔴 {sells} sells · 🟢 {buys} buys queued")
             else:
                 out.append("• Next session: no orders (holding cash or no change)")
         else:
-            out.append(f"• {momentum}")
+            out.append(f"• {esc(momentum)}")
 
     if swing:
         out.append("")
-        out.append("🔁 *Swing sleeve*: " + swing.split("|", 1)[1].strip())
+        out.append("🔁 *Swing sleeve*: " + esc(swing.split("|", 1)[1].strip()))
 
     if candidates:
         out.append("")
         out.append("🧪 *Candidate sleeves*")
         for c in candidates:
-            out.append("• " + c.replace("candidate ", "", 1))
+            out.append("• " + esc(c.replace("candidate ", "", 1)))
 
     if warnings:
         out.append("")
-        out.extend("⚠️ " + w.replace("WARNING: ", "", 1) for w in warnings)
+        out.extend("⚠️ " + esc(w.replace("WARNING: ", "", 1)) for w in warnings)
 
     out.append("")
     if report:
-        out.append(f"📄 Report: `{report}`")
+        out.append(f"📄 Report: {esc(report)}")
     if orders_csv:
-        out.append(f"🧾 Orders file: `{orders_csv}`")
+        out.append(f"🧾 Orders file: {esc(orders_csv)}")
     print("\n".join(out))
     return 0
 

@@ -115,6 +115,13 @@ def init_momentum(
 ) -> dict:
     """Add a momentum-rotation sleeve (own capital, frozen params) to the ledger."""
     con = _db(cfg)
+    try:
+        return _init_momentum(con, cfg, start, params, liquid_top, reset)
+    finally:
+        con.close()
+
+
+def _init_momentum(con, cfg, start, params, liquid_top, reset) -> dict:
     with con:
         con.execute(META_DDL)
     meta = _meta(con)
@@ -196,6 +203,16 @@ def promote_candidate(cfg: Config, instruments: pd.DataFrame, slug: str, start: 
         got = "no evaluation of the current file" if trial is None else f"verdict {trial['verdict']}"
         raise SystemExit(f"{slug}: cannot promote ({got}). Run `trader research-eval {slug}` and it must PASS.")
     con = _db(cfg)
+    try:
+        return _promote(con, cfg, slug, m, sha, trial, start)
+    finally:
+        con.close()
+
+
+def _promote(con, cfg, slug, m, sha, trial, start) -> dict:
+    from .data.sources import BENCHMARK
+    from .research import evaluate as ev
+
     with con:
         con.execute(META_DDL)
     meta = _meta(con)
@@ -226,6 +243,13 @@ def promote_candidate(cfg: Config, instruments: pd.DataFrame, slug: str, start: 
 
 def retire_candidate(cfg: Config, slug: str) -> None:
     con = _db(cfg)
+    try:
+        _retire(con, slug)
+    finally:
+        con.close()
+
+
+def _retire(con, slug) -> None:
     with con:
         con.execute(META_DDL)
     cands = _meta(con).get("candidates", {})
@@ -291,6 +315,13 @@ def is_stale(last_bar, last_complete_day) -> bool:
 def sync(cfg: Config, instruments: pd.DataFrame, asof: str | None = None) -> PaperState:
     """Replay each sleeve from its start to `asof` (default: latest bar) and persist the state."""
     con = _db(cfg)
+    try:
+        return _sync(con, cfg, instruments, asof)
+    finally:
+        con.close()
+
+
+def _sync(con, cfg, instruments, asof) -> PaperState:
     meta = _meta(con)
     if "params" not in meta and "momentum" not in meta:
         raise SystemExit("No paper ledger. Run `trader paper-momentum` (or `trader paper-init`) first.")

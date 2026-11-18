@@ -37,6 +37,21 @@ def next_session(d) -> pd.Timestamp:
     return n
 
 
+def holiday_list_warning(now=None, scripts_dir=None) -> str | None:
+    """WARNING text when scripts/nse_holidays_<year>.txt is missing for the current IST year (next year too in December)."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    now = now or datetime.now(ZoneInfo("Asia/Kolkata"))
+    scripts_dir = scripts_dir or ROOT / "scripts"
+    years = [now.year] + ([now.year + 1] if now.month == 12 else [])
+    missing = [y for y in years if not (scripts_dir / f"nse_holidays_{y}.txt").exists()]
+    if not missing:
+        return None
+    return (f"WARNING: no NSE holiday list for {', '.join(map(str, missing))} "
+            f"(scripts/nse_holidays_{missing[0]}.txt); holidays are not skipped until it is added.")
+
+
 def last_session_on_or_before(d) -> date:
     n = pd.Timestamp(d).normalize()
     while not is_session(n):

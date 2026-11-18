@@ -9,8 +9,9 @@ is no fair backtest history, so fundamentals-based candidates are forward-paper-
 from __future__ import annotations
 
 import time
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -73,12 +74,16 @@ def panel(fund_dir: Path | None, dates: pd.DatetimeIndex, syms: list[str], field
     return out
 
 
+def ist_today() -> date:
+    return datetime.now(ZoneInfo("Asia/Kolkata")).date()
+
+
 def snapshot(fund_dir: Path, symbols: list[str], day: date | None = None, pause: float = 0.3, retries: int = 2):
     """Fetch today's fundamentals for `symbols` and save them as `<day>.parquet`.
     Returns (path, rows_saved, failed_symbols). Missing fields stay NaN."""
     import yfinance as yf
 
-    day = day or date.today()
+    day = day or ist_today()
     fund_dir = Path(fund_dir)
     fund_dir.mkdir(parents=True, exist_ok=True)
     rows, failed = {}, []
