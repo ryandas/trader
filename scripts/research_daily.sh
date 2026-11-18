@@ -7,7 +7,8 @@
 set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HOLIDAYS="${TRADER_HOLIDAYS_FILE:-$SCRIPT_DIR/nse_holidays_2026.txt}"
+HOLIDAY_FILES=("$SCRIPT_DIR"/nse_holidays_*.txt)
+[ -n "${TRADER_HOLIDAYS_FILE:-}" ] && HOLIDAY_FILES=("$TRADER_HOLIDAYS_FILE")
 REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOG_DIR="${TRADER_LOG_DIR:-${TMPDIR:-/tmp}/trader-logs}"
 # Guard policy (applied after the run). Tracked files are restored unless they match TRACKED_OK_RE.
@@ -16,7 +17,7 @@ TRACKED_OK_RE='^(research/backlog\.md|research/india_evidence\.md|research/journ
 UNTRACKED_OK_RE='^(research/journal/.*|src/trader/research/candidates/.*|tests/test_[^/]*\.py)$'
 
 today_ist=$(TZ=Asia/Kolkata date +%Y-%m-%d)
-if grep -qx "$today_ist" "$HOLIDAYS" 2>/dev/null; then
+if cat "${HOLIDAY_FILES[@]}" 2>/dev/null | grep -qx "$today_ist"; then
   exit 0   # NSE holiday: no new data, nothing to test; silent skip
 fi
 

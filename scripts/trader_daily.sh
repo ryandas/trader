@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # Paper-trading daily routine (NSE). Paper only: never places orders.
 # Scheduled by Hermes cron at 16:30 Asia/Kolkata, Mon-Fri (after the 16:00 data cutoff, so today's bar is final). Skips NSE equity holidays
-# (list: scripts/nse_holidays_2026.txt next to this script; 2026 only).
+# (lists: scripts/nse_holidays_<year>.txt next to this script; add one per year).
 # Empty stdout = nothing delivered. Stdout is the Telegram message, so keep it short.
 set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
-HOLIDAYS="${TRADER_HOLIDAYS_FILE:-$SCRIPT_DIR/nse_holidays_2026.txt}"
+# Holiday lists: every scripts/nse_holidays_<year>.txt, or just TRADER_HOLIDAYS_FILE when set.
+HOLIDAY_FILES=("$SCRIPT_DIR"/nse_holidays_*.txt)
+[ -n "${TRADER_HOLIDAYS_FILE:-}" ] && HOLIDAY_FILES=("$TRADER_HOLIDAYS_FILE")
 LOG_DIR="${TRADER_LOG_DIR:-${TMPDIR:-/tmp}/trader-logs}"
 
 today_ist=$(TZ=Asia/Kolkata date +%Y-%m-%d)
-if grep -qx "$today_ist" "$HOLIDAYS" 2>/dev/null; then
+if cat "${HOLIDAY_FILES[@]}" 2>/dev/null | grep -qx "$today_ist"; then
   exit 0   # NSE holiday: silent skip
 fi
 
@@ -20,7 +22,16 @@ mkdir -p "$LOG_DIR"
 log="$LOG_DIR/trader_daily_$(date -u +%Y%m%dT%H%M).log"
 echo "Trader daily paper run $(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M IST')"
 
+year_ist="${today_ist%%-*}"
+if ! ls "$SCRIPT_DIR"/nse_holidays_"$year_ist".txt >/dev/null 2>&1 && [ -z "${TRADER_HOLIDAYS_FILE:-}" ]; then
+  echo "⚠️ No scripts/nse_holidays_${year_ist}.txt: holidays are not being skipped this year"
+fi
+
 if timeout 1500 uv run trader daily >"$log" 2>&1; then
+  # Keep collecting dated fundamentals under Hermes (was Claude-only via /daily). Skips itself unless the newest
+  # snapshot is 7+ days old; a failure here never fails the run.
+  timeout 900 uv run trader fundamentals-snapshot --if-stale-days 7 >>"$log" 2>&1 \
+    || echo "⚠️ fundamentals snapshot failed (see log)"
   # Telegram-ready summary: labelled sections, built from the lines `trader daily` echoes.
   if uv run python "$SCRIPT_DIR/format_daily_message.py" "$log"; then
     echo "✅ Run OK · log: $log"

@@ -16,16 +16,24 @@ Paper trading only. Nothing in `src/` places orders, and `config.yaml` has `mode
 
 ## Daily idea testing (Hermes cron)
 
-- Hermes cron job `trader-research-daily`, Mon-Fri 18:30 Asia/Kolkata (after the 16:30 paper run). Skips NSE holidays (same list as the paper run). It runs `scripts/research_daily.sh` (wrapper at `/opt/data/scripts/research_daily.sh`), which runs Claude Code in print mode for ONE idea of the `/research` loop.
+- Hermes cron job `trader-research-daily`, Mon-Fri 18:30 Asia/Kolkata (after the 16:30 paper run). Skips NSE holidays (same list as the paper run). It runs `scripts/research_daily.sh` (a wrapper copy may exist on the old host; the repo script is the source of truth), which runs Claude Code in print mode for ONE idea of the `/research` loop.
 - Prompt: `.claude/commands/research.md` (frontmatter stripped, `$ARGUMENTS` = 1) plus `scripts/research_daily_prompt.md` (unattended overrides).
 - Guardrails: `research-promote` and `research-retire` are blocked in the tool allowlist, so any PASS or FORWARD_ONLY waits for the owner's approval. `evaluate.py` and `dsr.py` are checksummed before and after the run and restored from git if changed. The script refuses to start on a dirty repo.
 - Output: `reports/research/last_run.txt` (idea, verdict, deciding gate, trial count, promotion status, journal path) goes to Telegram. Changes are committed locally on success. Nothing is pushed.
 - Each run counts one trial in `data/research.db` (gitignored; local to this host). Trials are not shared across hosts. Every trial, pass or fail, raises the deflated-Sharpe bar for later ideas.
 - Dry check without running Claude: `DRY_RUN=1 scripts/research_daily.sh`.
 
-## Holiday list
+## Holiday lists
 
-`scripts/nse_holidays_2026.txt` has 2026 dates only, one `YYYY-MM-DD` per line, `#` comments allowed (matched with `grep -qx`, so no trailing spaces). **A 2027 list is needed before January 2027**: either append 2027 dates to this file or add `nse_holidays_2027.txt` and change `HOLIDAYS` in the script (it reads one file). Without it the run also happens on holidays (effect not verified; a stale-data WARNING may appear).
+Both scripts read every `scripts/nse_holidays_<year>.txt` (one `YYYY-MM-DD` per line, `#` comments allowed, no trailing spaces; `TRADER_HOLIDAYS_FILE` overrides with a single file). **Add `nse_holidays_2027.txt` before January 2027.** If the current year has no file, the daily message starts with a warning and the run also happens on holidays (a stale-data WARNING may appear). `handoff_check.sh` fails when the current year's list is missing.
+
+## Moving to a new Hermes host
+
+1. Old host: `scripts/handoff_pack.sh [OUT_DIR] [--with-candles]` writes `trader-state-<stamp>.tar.gz` (consistent SQLite backups of `paper.db` and `research.db`, params, membership, fundamentals, `config.yaml`, git HEAD; no `.env`; candles only with the flag, otherwise `trader update` refetches them).
+2. New host: clone the repo (or copy it; `git log` has the research history), `tar -xzf <pack> -C <repo>`, install `uv` (and the `claude` CLI for the research job), then `scripts/handoff_check.sh` (add `--quick` to skip tests). It prints `READY` or lists failures.
+3. Create the two Hermes cron jobs (timezone Asia/Kolkata, Mon-Fri): `16:30` runs `scripts/trader_daily.sh`; `18:30` runs `scripts/research_daily.sh`. Stdout of each is the Telegram message; empty stdout sends nothing.
+4. Do not run `paper-momentum --reset` or `research-promote` on the new host: the ledger is a replay from frozen params in `paper.db`. Only one host should run the jobs, otherwise two ledgers and two trial counts diverge.
+5. `trader_daily.sh` now also runs `fundamentals-snapshot --if-stale-days 7` after the daily run, so Hermes keeps building the dated fundamentals history (previously only `/daily` under Claude did).
 
 ## Where things live
 
@@ -37,7 +45,7 @@ Paper trading only. Nothing in `src/` places orders, and `config.yaml` has `mode
 
 - Manual research runs (`/research N`, `trader research-*` by hand). The scheduled daily run is described above.
 - `/daily` (`.claude/commands/daily.md`) summary routine, including its Dhan MCP account check (step 3). Dhan MCP is reachable only from Claude Code, not Hermes.
-- `trader fundamentals-snapshot` (run from `/daily`, not from the script), `membership-snapshot` (about monthly, manual).
+- `membership-snapshot` (about monthly, manual). `fundamentals-snapshot` now also runs from `trader_daily.sh`.
 
 ## Live trading
 
