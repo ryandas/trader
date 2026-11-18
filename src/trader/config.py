@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from dotenv import load_dotenv
@@ -53,6 +54,7 @@ class MomentumCfg(BaseModel):
 
 
 class Config(BaseModel):
+    mode: Literal["paper", "live"] = "paper"  # "live" is not implemented; nothing in src/ places orders
     capital: float = 100_000
     monthly_contribution: float = 0  # INR added at each month-end close (paper sleeves and research harness)
     risk_per_trade: float = 0.01

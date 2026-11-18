@@ -1,4 +1,5 @@
-capital: 5000            # starting capital (INR)
+mode: paper              # paper only; "live" is a deferred future option and is not implemented
+capital: 5000          # starting capital (INR)
 monthly_contribution: 5000   # INR deposited at each month-end close (0 = lump sum only)
 risk_per_trade: 0.01     # fraction of equity risked per trade
 history_years: 10
