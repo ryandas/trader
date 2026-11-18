@@ -6,8 +6,10 @@ Move an idea to "Done" with its verdict after it is tested.
 Data available: daily OHLCV, sector, dated fundamentals snapshots (from 2026-11-18 on: forward-only, no backtest).
 Not available: point-in-time fundamentals history, intraday, options, news.
 
-Research history was cleared on 2026-11-18 at the user's request. The previous journal, trial registry and candidates are in
-the scratch archive /opt/data/cache/scratch/research_archive_20261118T011039 and in git history.
+Research history was cleared twice on 2026-11-18 at the user's request (first: journal, registry and candidates; second: registry
+and journal again, candidates kept). Earlier material is in git history and the scratch archive
+/opt/data/cache/scratch/research_archive_20261118T011039. Trials and results now live in Postgres (`trader research-status`,
+`trader show research-eval <slug> summary`).
 
 ## Queue
 
@@ -22,12 +24,11 @@ AQR, arXiv q-fin, NSE/BSE methodologies, Indian journals), at most 5 new rows pe
 
 | slug | date | verdict | note |
 |---|---|---|---|
-| frog_pan | 2026-11-18 | FAIL (trial 1) | 10.7% vs index 12.9%; 3/6 years; grid below index. Journal 2026-11-18-frog_pan. |
-| int_mom | 2026-11-18 | FAIL (trial 2) | 12.66% vs index 12.9%; Q grid point 8.9%; DSR 0.938. Journal 2026-11-18-int_mom. |
-| max_lottery | 2026-11-18 | FAIL (trial 3) | 3.54% vs index 12.9%, below random picks at every account size. Journal 2026-11-18-max_lottery. |
-| trend_ma | 2026-11-18 | FAIL (trial 4) | 13.68% vs index 12.9%; DSR 0.820 (need 0.95); quarterly grid point 7.7%. Summary reports/research/trend_ma/summary.md. |
-| str_rev | 2026-11-18 | FAIL (trial 5) | -6.31% CAGR vs index 12.74%; charges 4.41%/yr; DSR 0.019. Journal 2026-11-18-str_rev. |
-| vol_mom | 2026-11-18 | FAIL (trial 6) | 13.83% vs index 12.74%, basket 16.1%; 2/6 years; 3 of 4 grid points below index; DSR 0.678. Journal 2026-11-18-vol_mom. |
+
+Fresh start 2026-11-18 (second reset, at the user's request): the trial registry (now counting from 0) and the journal were
+emptied, and the Done table below was cleared. The earlier verdicts (frog_pan, int_mom, max_lottery, trend_ma, str_rev,
+vol_mom: all FAIL at INR 5,000; see `git log -- research/backlog.md research/journal`) are no longer counted. Their candidate
+modules are still in `src/trader/research/candidates/` and are not queued; add a row to Queue to re-evaluate one.
 
 ## Ideas that came out of results
 - frog_pan_winners: ID rank applied only to PRET>0 stocks (smooth losers were rewarded in frog_pan). New trial.

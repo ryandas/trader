@@ -1,5 +1,15 @@
 # Research harness changes
 
+## 2026-11-18: storage moved to Postgres; trial registry reset to 0
+
+- Change: the trial registry (`trials`), research-eval outputs, ledger, candles, fundamentals and membership moved from local
+  SQLite/parquet/CSV to Postgres (`src/trader/db.py`, `outputs.py`). `trials` is append-only via a database trigger. Gate formulas,
+  grids and `HARNESS_VERSION` are unchanged (`src/trader/research/evaluate.py` only changed where it reads and writes stored outputs).
+- Trial count: reset to 0 at the user's request (second reset). The six trials since the first reset were not in the migrated
+  database anyway (it held 26 older pre-reset rows), so they are not carried over; their journals were removed from the working
+  tree (kept in git history). The deflated-Sharpe bar restarts from N=1: results before and after this date are not comparable
+  on that gate.
+
 ## 2026-11-18: `walkforward._chain` keeps each fold's first-day return (REVIEW L3)
 
 - Change: `_chain` used to rescale each fold so its first row equalled the carried level

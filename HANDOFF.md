@@ -20,7 +20,7 @@ Paper trading only. Nothing in `src/` places orders, and `config.yaml` has `mode
 - Prompt: `.claude/commands/research.md` (frontmatter stripped, `$ARGUMENTS` = 1) plus `scripts/research_daily_prompt.md` (unattended overrides).
 - Guardrails: `research-promote` and `research-retire` are blocked in the tool allowlist, so any PASS or FORWARD_ONLY waits for the owner's approval. `evaluate.py` and `dsr.py` are checksummed before and after the run and restored from git if changed. The script refuses to start on a dirty repo.
 - Output: `reports/research/last_run.txt` (idea, verdict, deciding gate, trial count, promotion status, journal path) goes to Telegram. Changes are committed locally on success. Nothing is pushed.
-- Each run counts one trial in the `trials` table in Postgres (shared by every host that uses the same database). Every trial, pass or fail, raises the deflated-Sharpe bar for later ideas.
+- Each run counts one trial in the `trials` table in Postgres (shared by every host that uses the same database; the count was reset to 0 on 2026-11-18). Every trial, pass or fail, raises the deflated-Sharpe bar for later ideas.
 - Dry check without running Claude: `DRY_RUN=1 scripts/research_daily.sh`.
 
 ## Holiday lists
