@@ -38,11 +38,11 @@ class CostCfg(BaseModel):
     brokerage_per_order: float = 0
     slippage_bps: float = 5
     stt_pct: float = 0.001  # both sides
-    exch_pct: float = 0.0000297  # NSE transaction charge
+    exch_pct: float = 0.000030699  # NSE transaction charge (Dhan 0.0030699%)
     sebi_pct: float = 0.000001
     stamp_pct: float = 0.00015  # buy side only
     gst: float = 0.18  # on brokerage + exchange + sebi
-    dp_charge: float = 15.34  # per scrip, sell side
+    dp_charge: float = 14.75  # per scrip, sell side: Dhan Rs 12.50 + 18% GST
 
 
 class MomentumCfg(BaseModel):
