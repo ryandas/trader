@@ -21,10 +21,10 @@ log="$LOG_DIR/trader_daily_$(date -u +%Y%m%dT%H%M).log"
 echo "Trader daily paper run $(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M IST')"
 
 if timeout 1500 uv run trader daily >"$log" 2>&1; then
-  # Keep only the summary lines `trader daily` echoes (date/regime, sleeves, candidates, report path, warnings).
-  grep -E '^(swing sleeve|momentum sleeve|candidate |report:|WARNING)|^[0-9]{4}-[0-9]{2}-[0-9]{2} \| regime' "$log"
-  echo "OK (exit 0). Log: $log"
+  # Telegram-ready summary: labelled sections, built from the lines `trader daily` echoes.
+  python3 "$SCRIPT_DIR/format_daily_message.py" "$log"
+  echo "✅ Run OK · log: $log"
 else
-  echo "FAILED: trader daily exited non-zero. Last 40 log lines:"
+  echo "❌ Trader daily run FAILED (exit non-zero). Last 40 log lines:"
   tail -n 40 "$log"
 fi
