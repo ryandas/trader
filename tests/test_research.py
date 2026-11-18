@@ -276,3 +276,51 @@ def test_warm_start_invests_at_window_start_and_is_off_by_default(monkeypatch):
     assert warm.equity["invested"].iloc[3] > 0.5  # invested within days, like a running account
     # off by default: identical to a plain call, and a monthly cold start is unaffected when a signal is due on day one
     pd.testing.assert_frame_equal(cold.equity, mom.run(cfg, prep, semi, start, idx[-1], warm_start=False).equity)
+
+
+def test_frog_pan_prefers_smooth_winner_over_jumpy_winner():
+    from trader.research.candidates import frog_pan
+
+    n = 320
+    idx = pd.bdate_range("2023-01-02", periods=n)
+    smooth = 100 * 1.002 ** np.arange(n)
+    jumpy_r = np.full(n, -0.0005)
+    jumpy_r[10::25] = 0.04
+    jumpy = 100 * np.cumprod(1 + jumpy_r)
+    loser = 100 * 0.999 ** np.arange(n)
+    close = pd.DataFrame({"SMOOTH": smooth, "JUMPY": jumpy, "LOSER": loser}, index=idx)
+    prep = type("P", (), {"close_df": close})()
+    s = frog_pan.score(prep, lookback=252, skip=21)
+    assert np.isnan(s[:200]).all()  # needs the full formation window
+    # NB: ID is sign-adjusted, so a smooth LOSER also scores high on the ID rank (known flaw, see journal); test winners only
+    assert s[-1, 0] > s[-1, 1]
+    assert s[-1, 2] < s[-1, 0]
+
+
+def test_int_mom_ignores_recent_months():
+    from trader.research.candidates import int_mom
+
+    n = 300
+    idx = pd.bdate_range("2023-01-02", periods=n)
+    old_winner = np.concatenate([np.linspace(100, 200, 150), np.linspace(200, 100, 150)])  # up early, crashes recently
+    recent_winner = np.concatenate([np.full(150, 100.0), np.linspace(100, 300, 150)])
+    prep = type("P", (), {"close_df": pd.DataFrame({"OLD": old_winner, "NEW": recent_winner}, index=idx)})()
+    s = int_mom.score(prep, far=252, near=126)
+    assert np.isnan(s[:251]).all()
+    assert s[-1, 0] > s[-1, 1]  # the early winner outranks the recent one
+
+
+def test_max_lottery_penalises_a_single_huge_day():
+    from trader.research.candidates import max_lottery
+
+    n = 60
+    idx = pd.bdate_range("2024-01-01", periods=n)
+    calm = 100 * np.cumprod(np.full(n, 1.002))
+    r = np.full(n, 0.001)
+    r[50] = 0.30  # one lottery-like day
+    lotto = 100 * np.cumprod(1 + r)
+    prep = type("P", (), {"close_df": pd.DataFrame({"CALM": calm, "LOTTO": lotto}, index=idx)})()
+    s = max_lottery.score(prep, window=21, k=5)
+    assert np.isnan(s[:20]).all()
+    assert s[55, 0] > s[55, 1]  # window still contains the jump
+    assert s[45, 1] > s[45, 0]  # before the jump LOTTO has the smaller max return, so it ranks higher: the jump flips it
