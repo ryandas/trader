@@ -39,7 +39,7 @@ Both scripts read every `scripts/nse_holidays_<year>.txt` (one `YYYY-MM-DD` per 
 
 - Everything is in Postgres (`POSTGRES_*` in the gitignored `.env`, which must be created by hand on a new host): candles, instruments, membership, fundamentals, the paper ledger (`paper_meta` + sleeve tables), research trials, generated outputs and `job_runs`. Read reports with `uv run trader show daily [date]`; `uv run trader db status` shows row counts. The paper ledger is a deterministic replay from frozen params, so `paper_meta` plus `config.yaml` matter; do not reset it.
 - The server has no TLS (plaintext connection as of 2026-11-18): credentials and data cross the network unencrypted. Prefer an SSH tunnel or `POSTGRES_SSLMODE=require` once the server supports TLS.
-- The pre-migration local files (`data/`, `reports/`) are an unused backup of the 2026-11-18 import and can be deleted once you are satisfied.
+- The pre-migration local files (`data/`, `reports/`) were deleted on 2026-11-18 after the verified import, so Postgres holds the only copy: take periodic `pg_dump` backups.
 - Nothing has been pushed; the repo has local history only (an `origin` remote is configured but unused).
 
 ## Claude-only (not part of the Hermes run)
