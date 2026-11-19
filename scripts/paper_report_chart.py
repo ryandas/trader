@@ -27,7 +27,7 @@ sys.path.insert(0, str(REPO / "src"))
 from trader import db  # noqa: E402
 
 ROW_IN = 0.30  # inches per table row: tall enough for 9pt text, so no table is clipped
-COLORS = {"cash": "#9aa5b1", "swing": "#1f77b4", "mom": "#2ca02c", "paid": "#444444"}
+COLORS = {"cash": "#9aa5b1", "swing": "#1f77b4", "mom": "#2ca02c", "cand": "#ff7f0e", "paid": "#444444"}
 
 
 def _table(sql: str) -> pd.DataFrame:
@@ -56,7 +56,9 @@ def _n(rows: int) -> int:
 
 
 def build(out: Path) -> Path:
-    acct = _table("SELECT date, equity, value, cash, swing_value, mom_value, deposited FROM account_equity ORDER BY date")
+    acct = _table("SELECT * FROM account_equity ORDER BY date")
+    if not acct.empty and "cand_value" not in acct:  # ledger written before candidates were folded in
+        acct["cand_value"] = 0.0
     swing_pos = _table("SELECT sym, strat, qty, entry_price, last_close, stop FROM positions ORDER BY sym")
     swing_ord = _table("SELECT sym, strat, entry_type, max_entry, stop, qty, est_entry FROM orders ORDER BY sym")
     mom_pos = _table("SELECT symbol, qty, entry_price, entry_date, last_close FROM mom_positions ORDER BY symbol")
@@ -92,16 +94,16 @@ def build(out: Path) -> Path:
         ax.axis("off")
     else:
         d = pd.to_datetime(acct["date"])
-        ax.stackplot(d, acct["cash"], acct["swing_value"], acct["mom_value"], step="post", alpha=0.85,
-                     colors=[COLORS["cash"], COLORS["swing"], COLORS["mom"]],
-                     labels=["Cash", "Swing positions", "Momentum positions"])
+        ax.stackplot(d, acct["cash"], acct["swing_value"], acct["mom_value"], acct["cand_value"], step="post", alpha=0.85,
+                     colors=[COLORS["cash"], COLORS["swing"], COLORS["mom"], COLORS["cand"]],
+                     labels=["Cash", "Swing positions", "Momentum positions", "Candidate positions"])
         ax.step(d, acct["deposited"], where="post", color=COLORS["paid"], linestyle=":", label="Paid in")
         ax.plot(d, acct["value"], color="black", lw=1.2, marker="o", ms=3, label="Account equity")
         last = acct.iloc[-1]
         ax.annotate(f"₹{last['value']:,.0f}", (d.iloc[-1], last["value"]), xytext=(-6, 8), textcoords="offset points",
                     ha="right", weight="bold")
         ax.set_title(f"Account equity ₹{last['value']:,.0f} = cash ₹{last['cash']:,.0f} + swing ₹{last['swing_value']:,.0f}"
-                     f" + momentum ₹{last['mom_value']:,.0f}   (paid in ₹{last['deposited']:,.0f})", loc="left", fontsize=10)
+                     f" + momentum ₹{last['mom_value']:,.0f} + candidates ₹{last['cand_value']:,.0f}   (paid in ₹{last['deposited']:,.0f})", loc="left", fontsize=10)
         ax.set_ylim(0, float(max(acct["value"].max(), acct["deposited"].max())) * 1.2)  # headroom for the legend
         ax.set_ylabel("INR")
         ax.ticklabel_format(axis="y", style="plain", useOffset=False)
@@ -116,9 +118,10 @@ def build(out: Path) -> Path:
     else:
         last = acct.iloc[-1]
         left = 0.0
-        for key, label in (("cash", "Cash"), ("swing_value", "Swing"), ("mom_value", "Momentum")):
+        for key, label, ck in (("cash", "Cash", "cash"), ("swing_value", "Swing", "swing"),
+                               ("mom_value", "Momentum", "mom"), ("cand_value", "Candidates", "cand")):
             v = float(last[key])
-            c = COLORS["cash" if key == "cash" else "swing" if key == "swing_value" else "mom"]
+            c = COLORS[ck]
             ax2.barh([0], [v], left=left, color=c, label=label)
             if value and v / value > 0.06:
                 ax2.text(left + v / 2, 0, f"{label}\n₹{v:,.0f} ({100 * v / value:.0f}%)", ha="center", va="center",

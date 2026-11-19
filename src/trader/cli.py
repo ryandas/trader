@@ -237,7 +237,7 @@ def daily(
     for slug, cs in st.cands.items():
         m = cs.result
         typer.echo(
-            f"candidate {slug} ({cs.tier}) | value {m.equity['value'].iloc[-1]:,.0f} (paid in {m.equity['deposited'].iloc[-1]:,.0f}) | {len(m.positions)} holdings | "
+            f"candidate {slug} ({cs.tier}) | positions {m.equity['value'].iloc[-1]:,.0f} (in the account) | {len(m.positions)} holdings | "
             f"{len(m.pending_sells)} sells, {len(m.pending_buys)} buys queued"
         )
     for slug, why in st.cand_errors.items():
@@ -378,12 +378,12 @@ def research_eval(
 @app.command("research-promote")
 @locked("ledger")
 def research_promote(slug: str = typer.Argument(...)) -> None:
-    """Freeze a candidate that passed research-eval into the paper ledger as its own forward-only sleeve."""
+    """Freeze a candidate that passed research-eval into the shared paper account as a forward-only sleeve (no capital of its own)."""
     from . import paper
 
     cfg = load_config()
     e = paper.promote_candidate(cfg, inst.load_instruments(), slug)
-    typer.echo(f"{slug} promoted ({e['tier']}): forward paper sleeve from {e['start']}, capital {e['capital']:,.0f}, "
+    typer.echo(f"{slug} promoted ({e['tier']}): forward paper sleeve from {e['start']}, funded from the account's cash (no capital or deposit of its own), "
                f"frozen params {e['params']}. Paper only; its backtest is not evidence.")
 
 

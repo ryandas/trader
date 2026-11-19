@@ -39,13 +39,14 @@ MOM_CAVEAT = (
 )
 
 ARBITRATION = (
-    "Both sleeves draw on this one cash balance. On a shared session all sells/exits run first, then momentum's "
-    "rebalance buys, then swing's entries; a buy is cut to the cash left and skipped if that is under half its "
-    "intended size. Momentum targets and swing risk are measured against total account equity."
+    "All sleeves draw on this one cash balance. On a shared session all sells/exits run first, then buys in the order "
+    "momentum, swing, promoted research candidates (promotion order); a buy is cut to the cash left and to the sleeve "
+    "cap, and skipped if that is under half its intended size. Targets and risk are measured against total account "
+    "equity. PROVISIONAL: no sleeve's positions may exceed {share:.0%} of account equity (config account.max_sleeve_share)."
 )
 
 
-def _account_section(st: PaperState) -> str:
+def _account_section(st: PaperState, cfg: Config) -> str:
     """The account: cash + each sleeve's positions = account equity, so the sections add up by construction."""
     a, spec = st.account, st.account_spec
     e = a.equity
@@ -57,10 +58,13 @@ def _account_section(st: PaperState) -> str:
         rows.append({"component": f"Swing sleeve positions ({len(a.swing.positions)} open)", "inr": f"{last['swing_value']:,.0f}"})
     if a.mom is not None:
         rows.append({"component": f"Momentum sleeve positions ({len(a.mom.positions)} holdings)", "inr": f"{last['mom_value']:,.0f}"})
+    for slug, c in a.cands.items():
+        rows.append({"component": f"Candidate `{slug}` positions ({len(c.positions)} holdings)",
+                     "inr": f"{c.equity['value'].iloc[-1]:,.0f}"})
     rows.append({"component": "**Account equity**", "inr": f"**{last['value']:,.0f}**"})
     return f"""## Account (one shared cash account)
 - Ledger start {spec.start.date()} | Paid in ₹{paid:,.0f} (₹{spec.capital:,.0f} start + ₹{spec.contribution:,.0f} once per month-end) | Account equity ₹{last['value']:,.0f} | Profit ₹{last['value'] - paid:+,.0f} | Time-weighted return {twr:+.2f}%
-- {ARBITRATION}
+- {ARBITRATION.format(share=cfg.account.max_sleeve_share)}
 
 {_md_table(pd.DataFrame(rows))}"""
 
@@ -129,7 +133,8 @@ def _momentum_section(cfg: Config, st: PaperState, orders_out: dict) -> str:
 CAND_CAVEAT = (
     "Research candidates trade on paper only, from their start date. A backtest PASS merely earned the right to be "
     "paper traded; only these forward numbers count, and months of them are needed before they mean anything. "
-    "They are NOT part of the account above: each is an isolated replay with its own capital."
+    "Each is a sleeve of the account above: it brings no money of its own, buys with the account's cash (after momentum "
+    "and swing) and its value counts toward account equity. PROVISIONAL design, owner to review."
 )
 
 
@@ -145,7 +150,9 @@ def _candidates_section(cfg: Config, st: PaperState) -> str:
             if c.tier != tier:
                 continue
             r, prep = c.result, c.prep
-            eq = r.equity["equity"]
+            eq = r.equity["value"]
+            val = float(eq.iloc[-1])
+            account = float(st.account.equity["value"].iloc[-1])
             b = bench.reindex(eq.index).ffill() if bench is not None else None
             idx_ret = f"{100 * (b.iloc[-1] / b.iloc[0] - 1):+.2f}%" if b is not None and len(b) > 1 else "n/a"
             li = prep.dates.get_loc(c.last_date)
@@ -159,8 +166,7 @@ def _candidates_section(cfg: Config, st: PaperState) -> str:
             nxt = "orders fill at the next open" if reb[li] else f"next signal: close of {nxt_d.date()}"
             rows.append({
                 "sleeve": slug, "start": c.start.date(), "days": len(eq),
-                "value": f"{r.equity['value'].iloc[-1]:,.0f}", "paid_in": f"{r.equity['deposited'].iloc[-1]:,.0f}",
-                "return": f"{100 * (eq.iloc[-1] / c.capital - 1):+.2f}%",
+                "value": f"{val:,.0f}", "% of account": f"{100 * val / account:.1f}%", "realised": _sleeve_pnl(r.trades),
                 "index_same_period": idx_ret, "holdings": len(r.positions),
                 "orders": f"{len(r.pending_sells)} sell / {len(r.pending_buys)} buy", "next": nxt,
             })
@@ -168,7 +174,7 @@ def _candidates_section(cfg: Config, st: PaperState) -> str:
             blocks.append(f"## {title}\n{_md_table(pd.DataFrame(rows))}")
     if st.cand_errors:
         blocks.append("## Candidate sleeves NOT replayed\n" + "\n".join(f"- `{k}`: {v}" for k, v in st.cand_errors.items()) + "\n")
-    return f"\n---\n\n# Research candidate sleeves (paper, outside the account)\n\n> **Paper only.** {CAND_CAVEAT}\n\n" + "\n".join(blocks)
+    return f"\n---\n\n# Research candidate sleeves (paper, inside the account)\n\n> **Paper only.** {CAND_CAVEAT}\n\n" + "\n".join(blocks)
 
 
 def _ref(day, item: str = "") -> str:
@@ -232,7 +238,7 @@ def write_report(cfg: Config, st: PaperState) -> tuple[str, str]:
 {warn}
 - Market regime (NIFTY 500): **{st.regime}**
 
-{_account_section(st)}
+{_account_section(st, cfg)}
 ## Account performance since ledger start
 {_account_performance(st, cfg)}
 
