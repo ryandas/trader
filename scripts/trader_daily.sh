@@ -50,6 +50,12 @@ rc=1
     # Ledger chart (PNG in charts/, path echoed to the message). A failure here never fails the run.
     if chart=$(timeout 300 uv run python "$SCRIPT_DIR/paper_report_chart.py" 2>>"$log"); then
       echo "📈 Chart: $chart"
+      # Deliver the image to the Telegram home channel (one attempt; a failure only adds a warning).
+      if bash "$SCRIPT_DIR/send_telegram_photo.sh" "$chart" "Paper ledger $(basename "$chart" .png | sed 's/^paper_report_//') (paper only)" >>"$log" 2>&1; then
+        echo "📨 Chart sent to Telegram"
+      else
+        echo "⚠️ chart not sent to Telegram (see log)"
+      fi
     else
       echo "⚠️ chart not generated (see log)"
     fi
