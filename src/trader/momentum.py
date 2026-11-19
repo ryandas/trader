@@ -246,7 +246,7 @@ class MomBook:
 
     def buy_at_open(self, d: int, min_fraction: float = 0.0, room: float = math.inf) -> None:
         """Fill the queued buys. A buy is cut to the cash available and to `room` (how much more position value the
-        shared account's sleeve cap lets this sleeve add); if the cut is below `min_fraction` of the intended quantity it
+        shared account's sleeve budget lets this sleeve add); if the cut is below `min_fraction` of the intended quantity it
         is skipped (shared account only; a lone sleeve passes 0 and is never limited in practice)."""
         o, cc = self.prep.o, self.cfg.costs
         for si, tv in self.buys:

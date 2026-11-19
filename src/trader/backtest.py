@@ -258,7 +258,7 @@ class SwingBook:
 
     def fills(self, d: int, min_fraction: float = 0.0, room: float = math.inf) -> None:
         """Fill the orders queued at the previous close. A buy is cut to the cash available and to `room` (the shared
-        account's sleeve cap); if the cut is below `min_fraction` of the ordered quantity it is skipped (shared account
+        account's sleeve budget); if the cut is below `min_fraction` of the ordered quantity it is skipped (shared account
         only: a lone sleeve passes 0 and is never limited)."""
         data, cc = self.prep.data, self.cfg.costs
         for od in self.pending:
