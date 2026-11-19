@@ -4,26 +4,26 @@ Design (owner decision, 2026-11-19): the ledger is a single cash account, not on
 
 - One cash balance. It starts at `capital` and receives `contribution` once per month-end for the whole account.
 - Both sleeves draw on that cash. Account equity = cash + swing positions + momentum positions.
-- Momentum targets are an equal share (1 / top_n) of TOTAL account equity; swing sizing (risk per trade, position and heat
-  caps, `min_size_fraction`) also uses TOTAL account equity. Position COUNTS (`max_positions`, `max_per_sector`) stay per
-  sleeve, since they describe how many names a sleeve may hold.
+- EQUAL SPLIT (provisional, owner decision 2026-11-19): N = active sleeves (momentum once started, swing if present, each
+  started promoted candidate). Each sleeve's BUDGET = account equity / N, measured at the open after sells. A sleeve
+  may hold at most its budget (what it already holds counts); a buy is cut to the room left. Momentum's and a candidate's
+  per-name target is budget / top_n. Swing risk per trade, `max_position_pct` and `max_heat` are still sized on TOTAL
+  account equity, but its positions stay within its budget. Unused budget stays CASH: it is never reassigned to another
+  sleeve. A lone sleeve's budget is the whole account. This one rule replaced the old `account.max_sleeve_share` cap.
+  Position COUNTS (`max_positions`, `max_per_sector`) stay per sleeve.
 - ARBITRATION on a shared session (the order cash is handed out at the open):
     1. every sell and exit first, swing (stop/target/rule/time exits) then momentum (rebalance/bear sells), so the
        cash they free is available to all buys;
     2. then buys: momentum's rebalance buys BEFORE swing's entries, so a month-end rebalance is never starved by swing;
-    3. a buy is cut to the cash left; if the cut quantity is below `min_size_fraction` (0.5) of the intended quantity the
+    3. a buy is cut to the cash left and to the sleeve's budget room; if the cut quantity is below `min_size_fraction` (0.5) of the intended quantity the
        buy is skipped. Cash never goes negative.
 - PROMOTED RESEARCH CANDIDATES (provisional, owner decision 2026-11-19) are further sleeves of this account (`CandSpec`).
   A candidate brings NO money: its positions are bought with the account's cash, it adds no deposit (the single
   month-end deposit is the only one), and its value counts toward account equity. Its promotion record's `capital` is the
-  research harness's and is never read here. Its targets are a 1/top_n share of TOTAL account equity, like momentum's.
+  research harness's and is never read here. Its targets are budget / top_n, like momentum's.
   Candidates buy last, after momentum and swing, in promotion order. Research itself (`research-eval`, the trial
   registry) stays unfolded and does not touch the account.
-- SLEEVE CAP (provisional): a sleeve's positions (swing and each candidate; NOT momentum, which is exempt and keeps
-  its full share of account equity as in its backtest) may not exceed
-  `account.max_sleeve_share` (config.yaml, default 0.40) of account equity at the open. A buy is cut so the sleeve stays
-  within the cap (what it already holds counts) and skipped below `min_size_fraction` of its intended size. 1.0 = no cap.
-  Orders are queued from the previous close without reserving cash against each other; arbitration happens only when
+- Orders are queued from the previous close without reserving cash against each other; arbitration happens only when
   they fill, so the result does not depend on which sleeve is listed first in the code path that queues them.
 - Like every sleeve, the account is a deterministic replay from its start date with frozen parameters (`paper.py`).
   Nothing incremental is stored, so re-running the replay gives the identical ledger.
@@ -91,10 +91,12 @@ class AccountResult:
 
 
 def open_session(d: int, swing: bt.SwingBook | None, mbook: mm.MomBook | None, min_fraction: float,
-                 cands: Sequence[mm.MomBook] = (), max_share: float = 1.0) -> None:
+                 cands: Sequence[mm.MomBook] = ()) -> None:
     """The cash arbitration rule: all sells and exits (every sleeve) first, then buys in the order momentum, swing,
-    candidates (promotion order). Each buy is cut to the cash left and (swing and candidates only, not momentum) to the sleeve cap (`max_share` of account equity
-    at the open, counting what the sleeve already holds) and skipped below `min_fraction` of its intended size."""
+    candidates (promotion order). Pass only the ACTIVE sleeves (started ones): N = how many are passed. Each sleeve's
+    budget is account equity at the open (after sells) / N; a buy is cut to the cash left and to the budget room (the
+    budget minus what the sleeve already holds), and skipped below `min_fraction` of its intended size. Unused budget
+    stays cash: it is never handed to another sleeve."""
     if swing is not None:
         swing.exits(d)
     if mbook is not None:
@@ -102,13 +104,17 @@ def open_session(d: int, swing: bt.SwingBook | None, mbook: mm.MomBook | None, m
     for c in cands:
         c.sell_at_open(d)
     books = ([swing] if swing is not None else []) + ([mbook] if mbook is not None else []) + list(cands)
+    if not books:
+        return
     equity = (swing or mbook or cands[0]).cash.value + sum(b.value_at_open(d) for b in books)  # at the open, after sells
 
-    def room(b) -> float:
-        return math.inf if max_share >= 1.0 else max(max_share * equity - b.value_at_open(d), 0.0)
+    budget = equity / len(books)
+
+    def room(b) -> float:  # a lone sleeve's budget is the whole account: cash is the only limit
+        return math.inf if len(books) == 1 else max(budget - b.value_at_open(d), 0.0)
 
     if mbook is not None:
-        mbook.buy_at_open(d, min_fraction, math.inf)  # momentum is exempt from the sleeve cap (owner decision)
+        mbook.buy_at_open(d, min_fraction, room(mbook))
     if swing is not None:
         swing.fills(d, min_fraction, room(swing))
     for c in cands:
@@ -148,7 +154,10 @@ def run(
 
     for d in range(i0, i1):
         s_on, m_on = swing is not None and d >= s0, mom is not None and d >= m0
-        open_session(d, sbook, mbook, cfg.min_size_fraction, cbooks, cfg.account.max_sleeve_share)
+        c_on = [d >= c0[k] for k in range(len(cbooks))]
+        n_active = int(s_on) + int(m_on) + sum(c_on)  # sleeves that share the account's equity equally
+        open_session(d, sbook if s_on else None, mbook if m_on else None, cfg.min_size_fraction,
+                     [b for b, on in zip(cbooks, c_on) if on])
         s_val = sbook.end_of_day(d) if sbook else 0.0
         m_val = mbook.invested(d) if mbook else 0.0
         c_vals = [b.invested(d) for b in cbooks]
@@ -165,13 +174,13 @@ def run(
                 c_rows[k].append((dates[d], v))
         if d == i1 - 1 and not emit_last:
             continue
-        if m_on:  # sleeve targets and risk are measured against TOTAL account value (cash + all sleeves)
-            mbook.decide(d, value)
-        if s_on:
+        if m_on:  # momentum and candidate targets are a share of the sleeve's BUDGET (account equity / N)
+            mbook.decide(d, value / n_active)
+        if s_on:  # swing risk and position caps are measured against TOTAL account value
             sbook.decide(d, value)
         for k, b in enumerate(cbooks):
-            if d >= c0[k]:
-                b.decide(d, value)
+            if c_on[k]:
+                b.decide(d, value / n_active)
 
     eq = pd.DataFrame(rows, columns=["date", "equity", "invested", "value", "cash", "swing_value", "mom_value",
                                      "cand_value", "deposited"]).set_index("date")

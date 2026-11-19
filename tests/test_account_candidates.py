@@ -1,9 +1,9 @@
 """Promoted research candidates are folded into the shared account (PROVISIONAL design, owner decision 2026-11-19).
 
-Written before the engine change. A candidate brings no money: its positions are bought with the account's cash, it adds
-no deposit, its value counts toward account equity, and each sleeve (momentum, swing, candidates) is capped at
-`account.max_sleeve_share` of account equity. Arbitration on a shared open: all sells/exits first, then buys in the
-order momentum, swing, candidates (promotion order).
+A candidate brings no money: its positions are bought with the account's cash, it adds no deposit, its value counts
+toward account equity, and it shares the account equally with the other active sleeves (budget = equity / N; the
+budget rules themselves are tested in test_account_budget.py). Arbitration on a shared open: all sells/exits first, then
+buys in the order momentum, swing, candidates (promotion order).
 """
 import numpy as np
 import pandas as pd
@@ -15,19 +15,14 @@ from test_research import HONEST, _ledger, lab  # noqa: F401  (lab is a fixture)
 from trader import backtest as bt
 from trader import ledger, paper
 from trader import momentum as mom
-from trader.config import ROOT, AccountCfg, Config
+from trader.config import ROOT, Config
 from trader.selector import Selector
 
 CP = mom.MomParams(lookback=60, skip=5, top_n=3, buffer=2)  # a candidate sleeve: different ranking, 3 names
 
 
-def _cfg(acct, share):
-    return acct[0].model_copy(update=dict(account=AccountCfg(max_sleeve_share=share)))
-
-
-def _run(acct, share=1.0, n_cands=1, end_i=520, start_i=300, cand_start_i=300, with_swing=True):
+def _run(acct, n_cands=1, end_i=520, start_i=300, cand_start_i=300, with_swing=True):
     cfg, _, idx, sprep, strats, mprep = acct
-    cfg = _cfg(acct, share)
     spec = ledger.AccountSpec(start=idx[start_i], capital=cfg.capital, contribution=cfg.monthly_contribution)
     cands = [ledger.CandSpec(f"c{i}", mprep, CP, idx[cand_start_i]) for i in range(n_cands)]
     return ledger.run(
@@ -64,8 +59,10 @@ def test_a_candidate_started_later_changes_nothing_before_its_start(acct):
     pd.testing.assert_frame_equal(a.equity[a.equity.index < cut][left], b.equity[b.equity.index < cut][left])
 
 
-def _open(acct, cash, share, momq=None, swingq=None, candq=(), d=400):
-    """One shared open with queued buys: momentum (sym, target), swing (symbol, value), candidates [(sym, target), ...]."""
+def _open(acct, cash, momq=None, swingq=None, candq=(), held=None, d=400):
+    """One shared open with queued buys: momentum (sym, target), swing (symbol, value), candidates [(sym, target), ...].
+    Only the sleeves that have an order (or a holding) take part, so N is the number of those sleeves.
+    `held` = (index of the book in [mom, cand0, ...], symbol, qty): a position it already holds."""
     cfg, idx, sprep, mprep, box, swing, mbook = _books(acct, cash)
     cbooks = [mom.MomBook(cfg, mprep, CP, box) for _ in candq]
     if momq:
@@ -76,24 +73,31 @@ def _open(acct, cash, share, momq=None, swingq=None, candq=(), d=400):
                                   int(swingq[1] // px), px, None)]
     for b, q in zip(cbooks, candq):
         b.buys = [(mprep.syms.index(q[0]), q[1])]
-    ledger.open_session(d, swing, mbook, cfg.min_size_fraction, cands=cbooks, max_share=share)
+    if held:
+        b = ([mbook] + cbooks)[held[0]]
+        si = mprep.syms.index(held[1])
+        b.pos[si] = {"qty": held[2], "px": float(mprep.o[d, si]), "cost": 0.0, "d": d - 5}
+    ledger.open_session(d, swing if swingq else None, mbook if (momq or held and held[0] == 0) else None,
+                        cfg.min_size_fraction, cands=cbooks)
     return box, swing, mbook, cbooks, mprep, sprep
 
 
 def test_arbitration_buys_go_momentum_then_swing_then_candidates(acct):
-    # momentum takes 6,000 of 10,000; swing wants 7,000 and is cut to what is left (~4,000); the candidate gets nothing
-    box, swing, mbook, (c0,), mprep, sprep = _open(acct, 10_000.0, 1.0, momq=("S3", 6_000.0), swingq=("S5", 7_000.0),
-                                                   candq=[("S6", 6_000.0)])
-    si = mprep.syms.index("S3")
-    assert mbook.pos[si]["qty"] == int(6_000.0 // (mbook.pos[si]["px"] * 1.004))
-    intended = int(7_000.0 // float(sprep.data["S5"].o[400]))
-    assert "S5" in swing.positions and swing.positions["S5"].qty < intended  # cut to the cash that was left
-    assert not c0.pos
-    assert box.value >= 0
+    # A sleeve already holds ~8,000 of a 10,000 account, so cash (2,000) is scarcer than the three budgets (~3,333).
+    # (1) the candidate holds it: momentum buys first and takes the cash; swing is left with too little and is skipped
+    box, swing, mbook, (c0,), mprep, sprep = _open(acct, 2_000.0, momq=("S3", 3_300.0), swingq=("S5", 3_300.0),
+                                                   candq=[("S6", 3_300.0)], held=(1, "S1", 80))
+    assert mbook.pos and "S5" not in swing.positions and box.value >= 0
+    # (2) momentum holds it (no buy of its own): swing buys before the candidate, which is left with nothing
+    box, swing, mbook, (c0,), mprep, sprep = _open(acct, 2_000.0, swingq=("S5", 3_300.0), candq=[("S6", 3_300.0)],
+                                                   held=(0, "S1", 80))
+    assert "S5" in swing.positions and not c0.pos and box.value >= 0
 
 
 def test_candidate_buys_in_promotion_order(acct):
-    box, swing, mbook, (c0, c1), mprep, _ = _open(acct, 7_000.0, 1.0, candq=[("S6", 6_000.0), ("S7", 6_000.0)])
+    # c0, c1 and a momentum holding of ~7,000: cash 3,000 of a ~10,000 account; each budget ~3,333, both ask for it
+    box, swing, mbook, (c0, c1), mprep, _ = _open(acct, 3_000.0, candq=[("S6", 3_300.0), ("S7", 3_300.0)],
+                                                  held=(0, "S1", 70))
     assert c0.pos and not c1.pos  # first promoted is served first; the second is cut below min_size_fraction
     assert box.value >= 0
 
@@ -103,62 +107,18 @@ def test_sells_of_every_sleeve_come_before_any_buy(acct):
     cbook = mom.MomBook(cfg, mprep, CP, box)
     d = 400
     held, want = mprep.syms.index("S1"), mprep.syms.index("S3")
-    cbook.pos[held] = {"qty": 50, "px": float(mprep.o[d, held]), "cost": 0.0, "d": d - 5}
+    px = float(mprep.o[d, held])
+    cbook.pos[held] = {"qty": 50, "px": px, "cost": 0.0, "d": d - 5}
     cbook.sells = {held: "rebalance"}
-    mbook.buys = [(want, 5_000.0)]  # momentum's buy needs cash that only the candidate's sell can free
-    ledger.open_session(d, swing, mbook, cfg.min_size_fraction, cands=[cbook], max_share=1.0)
+    mbook.buys = [(want, 0.4 * 50 * px)]  # needs cash that only the candidate's sell can free; fits half the account
+    ledger.open_session(d, None, mbook, cfg.min_size_fraction, cands=[cbook])
     assert held not in cbook.pos and want in mbook.pos
 
 
-def test_cap_does_not_limit_momentum_but_cuts_swing_and_candidates(acct):
-    # equity 100,000, cap 40% = 40,000. Momentum's 50,000 target is NOT capped; swing and a candidate asking 50,000 are.
-    box, _, mbook, _, mprep, _ = _open(acct, 100_000.0, 0.4, momq=("S3", 50_000.0))
-    q = mbook.pos[mprep.syms.index("S3")]
-    assert q["qty"] == int(50_000.0 // (q["px"] * 1.004))  # full target, not cut to 40,000
-    assert q["qty"] * q["px"] > 0.4 * 100_000.0
-    _, swing, _, _, _, sprep = _open(acct, 100_000.0, 0.4, swingq=("S5", 50_000.0))
-    sw = sum(p.qty * sprep.data[s].o[400] for s, p in swing.positions.items())
-    assert 0 < sw <= 0.4 * 100_000.0 * 1.0001
-    _, _, _, (c0,), mprep, _ = _open(acct, 100_000.0, 0.4, candq=[("S6", 50_000.0)])
-    cv = sum(q["qty"] * mprep.o[400, si] for si, q in c0.pos.items())
-    assert 0 < cv <= 0.4 * 100_000.0 * 1.0001
-
-
-def test_sleeve_cap_cuts_a_buy_and_skips_it_below_min_size(acct):
-    # 40% of equity 10,000 = 4,000: a 6,000 target is cut to the cap (67% of intended) and taken
-    box, _, _, (c0,), mprep, _ = _open(acct, 10_000.0, 0.4, candq=[("S3", 6_000.0)])
-    q = c0.pos[mprep.syms.index("S3")]
-    assert 0.3 * 10_000.0 < q["qty"] * q["px"] <= 0.4 * 10_000.0  # cut TO the cap, not skipped
-    # a 2% cap leaves room for under half the intended quantity: skipped, like a cash-short buy
-    box, _, _, (c0,), mprep, _ = _open(acct, 10_000.0, 0.02, candq=[("S3", 6_000.0)])
-    assert not c0.pos and box.value == 10_000.0
-
-
-def test_cap_applies_to_swing_and_candidates_and_counts_what_the_sleeve_already_holds(acct):
-    cfg, idx, sprep, mprep, box, swing, mbook = _books(acct, 10_000.0)
-    cbook = mom.MomBook(cfg, mprep, CP, box)
-    d = 400
-    held = mprep.syms.index("S1")
-    cbook.pos[held] = {"qty": 10, "px": float(mprep.o[d, held]), "cost": 0.0, "d": d - 5}
-    equity = 10_000.0 + 10 * float(mprep.o[d, held])
-    cbook.buys = [(mprep.syms.index("S6"), 6_000.0)]
-    px = float(sprep.data["S5"].o[d])
-    swing.pending = [bt.Order("S5", "breakout", "breakout#0", 2, "open", None, None, px * 0.5, None,
-                              int(6_000 // px), px, None)]
-    ledger.open_session(d, swing, mbook, cfg.min_size_fraction, cands=[cbook], max_share=0.4)
-    cand_value = sum(q["qty"] * mprep.o[d, si] for si, q in cbook.pos.items())
-    assert cand_value <= 0.4 * equity * 1.0001  # the existing holding counts toward the cap
-    sw_value = sum(p.qty * sprep.data[s].o[d] for s, p in swing.positions.items())
-    assert 0 < sw_value <= 0.4 * equity * 1.0001
-
-
-def test_cap_is_a_config_value_not_a_constant(acct):
-    assert Config().account.max_sleeve_share == 0.40
-    assert yaml.safe_load((ROOT / "config.yaml").read_text())["account"]["max_sleeve_share"] == 0.40
-    tight, loose = _run(acct, share=0.15), _run(acct, share=1.0)
-    # momentum is exempt: a tight cap does not shrink it; the capped swing sleeve never gets bigger
-    assert tight.equity["mom_value"].max() >= 0.9 * loose.equity["mom_value"].max()
-    assert tight.equity["swing_value"].max() <= loose.equity["swing_value"].max()
+def test_the_account_split_is_not_a_config_value(acct):
+    # the old `account.max_sleeve_share` cap was replaced by the equal budget: neither config nor config.yaml has it
+    assert not hasattr(Config(), "account")
+    assert "account" not in yaml.safe_load((ROOT / "config.yaml").read_text())
 
 
 # ---------------------------------------------------------------- persisted ledger: the record's capital is ignored
@@ -188,6 +148,5 @@ def test_candidate_record_capital_does_not_change_account_equity_or_deposits(lab
     e = out[5_000.0]
     assert e["value"].iloc[0] == pytest.approx(50_000)  # no extra 5,000 (or 7.5m) at the candidate's start
     assert e["deposited"].diff().fillna(0.0).isin([0.0, 5_000.0]).all()  # only the account's own deposit
-    # momentum is exempt from the cap and buys first, so the candidate may get no cash at all (open question 1)
     assert (e["cand_value"] >= 0).all() and (e["cash"] >= -1e-6).all()
     np.testing.assert_allclose(e["cash"] + e["swing_value"] + e["mom_value"] + e["cand_value"], e["value"], atol=1e-6)

@@ -40,10 +40,11 @@ MOM_CAVEAT = (
 
 ARBITRATION = (
     "All sleeves draw on this one cash balance. On a shared session all sells/exits run first, then buys in the order "
-    "momentum, swing, promoted research candidates (promotion order); a buy is cut to the cash left and to the sleeve "
-    "cap, and skipped if that is under half its intended size. Targets and risk are measured against total account "
-    "equity. PROVISIONAL: swing and each candidate sleeve may not exceed {share:.0%} of account equity (config "
-    "account.max_sleeve_share); momentum is exempt."
+    "momentum, swing, promoted research candidates (promotion order); a buy is cut to the cash left and to the "
+    "sleeve's budget, and skipped if that is under half its intended size. PROVISIONAL: every active sleeve gets an "
+    "equal budget of account equity / N (N = {n}); momentum and candidate targets are budget / top_n, swing risk is "
+    "sized on total account equity and its positions stay within its budget. Unused budget stays cash and is not "
+    "reassigned to another sleeve."
 )
 
 
@@ -65,7 +66,7 @@ def _account_section(st: PaperState, cfg: Config) -> str:
     rows.append({"component": "**Account equity**", "inr": f"**{last['value']:,.0f}**"})
     return f"""## Account (one shared cash account)
 - Ledger start {spec.start.date()} | Paid in ₹{paid:,.0f} (₹{spec.capital:,.0f} start + ₹{spec.contribution:,.0f} once per month-end) | Account equity ₹{last['value']:,.0f} | Profit ₹{last['value'] - paid:+,.0f} | Time-weighted return {twr:+.2f}%
-- {ARBITRATION.format(share=cfg.account.max_sleeve_share)}
+- {ARBITRATION.format(n=int(a.swing is not None) + int(a.mom is not None) + len(a.cands))}
 
 {_md_table(pd.DataFrame(rows))}"""
 

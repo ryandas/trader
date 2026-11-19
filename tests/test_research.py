@@ -254,7 +254,11 @@ def test_promote_requires_passing_trial_then_sync_runs_sleeve_and_leaves_momentu
     assert e["tier"] == "backtest_pass" and e["active"]
     st = paper.sync(cfg, inst, asof=str(idx[450].date()))
     assert "t_ok" in st.cands and not st.cand_errors
-    pd.testing.assert_frame_equal(before.mom.result.equity, st.mom.result.equity)  # momentum sleeve untouched
+    # equal split: a promoted candidate halves momentum's budget (momentum is no longer unaffected), same dates
+    b, a = before.mom.result.equity["value"], st.mom.result.equity["value"]
+    assert b.index.equals(a.index)
+    first = b[b > 0].index[0]
+    assert a[first] == pytest.approx(b[first] / 2, rel=0.05)
     con = paper._db(cfg)
     assert con.execute("select count(*) from cand_equity where sleeve='t_ok'").fetchone()[0] > 0
     assert con.execute("select count(*) from mom_equity").fetchone()[0] == len(before.mom.result.equity)

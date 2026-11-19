@@ -33,8 +33,9 @@ costs:                      # delivery equity; see CostCfg for statutory default
   brokerage_per_order: 0    # check your Dhan plan
   slippage_bps: 5
 
-account:                    # shared paper account (PROVISIONAL, see AGENTS.md "Shared account")
-  max_sleeve_share: 0.40    # swing and each candidate sleeve may not exceed this share of account equity; momentum is exempt
+# Shared paper account (PROVISIONAL, see AGENTS.md "Shared account"): no setting here. Every active sleeve (momentum,
+# swing if present, each promoted candidate) gets an equal budget of account equity / N at the open; unused budget
+# stays cash and is not reassigned. (The old `account.max_sleeve_share` cap was removed: the budget replaces it.)
 
 research:                   # fixed gates for harness v4 (review if capital/contribution changes)
   dsr_min: 0.95

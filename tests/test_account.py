@@ -13,7 +13,7 @@ from trader import backtest as bt
 from trader import ledger, outputs, paper, report
 from trader import momentum as mom
 from trader.accounting import CashBox
-from trader.config import AccountCfg, Config
+from trader.config import Config
 from trader.selector import Selector
 from trader.strategies import ALL
 
@@ -33,9 +33,7 @@ def acct(monkeypatch):
     frames = _frames()
     patch_candles(monkeypatch, frames)
     inst = pd.DataFrame({"symbol": [f"S{i}" for i in range(8)], "sector": list("AABBCCDD")})
-    # cap off here: these tests check engine equivalence with the single-sleeve backtests (the cap is tested in
-    # test_account_candidates.py)
-    cfg = Config(capital=CAPITAL, monthly_contribution=DEPOSIT, account=AccountCfg(max_sleeve_share=1.0))
+    cfg = Config(capital=CAPITAL, monthly_contribution=DEPOSIT)
     strats = {f"{n}#0": ALL[n]() for n in ALL}
     for k, s in strats.items():
         s.key = k
@@ -127,7 +125,8 @@ def test_momentum_rebalance_buy_is_not_starved_by_swing_buy_on_the_same_day(acct
     ledger.open_session(d, swing, mbook, cfg.min_size_fraction)
     qty_mom = mbook.pos[si]["qty"]
     fp = mbook.pos[si]["px"]
-    assert qty_mom == int(min(target, 10_000.0) // (fp * 1.004))  # full momentum size, as if swing did not exist
+    # momentum fills first, up to its budget (half of the 10,000 account with swing present), whatever swing asks
+    assert qty_mom == int(5_000.0 // (fp * 1.004))
     assert box.value >= 0
     # swing got only what was left: cut to the cash available or skipped by min_size_fraction, never negative cash
     assert (other not in swing.positions) or swing.positions[other].qty < 1000
@@ -138,16 +137,16 @@ def test_cash_short_buy_is_cut_to_cash_and_tiny_cuts_are_skipped(acct):
     cfg, idx, sprep, mprep, box, swing, mbook = _books(acct, 1_000.0)
     si = mprep.syms.index("S3")
     mbook.buys = [(si, 9_000.0)]  # cash covers ~11% of the target: below min_size_fraction -> skipped
-    ledger.open_session(d, swing, mbook, cfg.min_size_fraction)
+    ledger.open_session(d, None, mbook, cfg.min_size_fraction)  # momentum alone: its budget is the whole account
     assert si not in mbook.pos and box.value == 1_000.0
     cfg, idx, sprep, mprep, box, swing, mbook = _books(acct, 6_000.0)
     mbook.buys = [(si, 9_000.0)]  # 67% of target: cut to cash and taken
-    ledger.open_session(d, swing, mbook, cfg.min_size_fraction)
+    ledger.open_session(d, None, mbook, cfg.min_size_fraction)
     assert si in mbook.pos and 0 <= box.value < 6_000.0
 
 
-def test_momentum_target_is_a_share_of_total_account_equity(acct):
-    """Equal weight of TOTAL equity: target = account equity / top_n, so swing positions count in the denominator."""
+def test_momentum_target_is_a_share_of_its_budget(acct):
+    """Equal split: with swing present N = 2, so target = (account equity / 2) / top_n (3 sleeves: test_account_budget.py)."""
     r = _run(acct)
     assert r.mom.pending_buys or r.mom.positions  # scenario exists
     cfg, _, idx, sprep, strats, mprep = acct
@@ -156,7 +155,7 @@ def test_momentum_target_is_a_share_of_total_account_equity(acct):
         if mprep.rebal[i] and mprep.mkt[i] != 0:
             rr = _run(acct, end_i=i)
             if rr.mom.pending_buys:
-                assert rr.mom.pending_buys[0][1] == pytest.approx(rr.equity["value"].iloc[-1] / MP.top_n)
+                assert rr.mom.pending_buys[0][1] == pytest.approx(rr.equity["value"].iloc[-1] / 2 / MP.top_n)
                 return
     pytest.fail("no month-end with queued momentum buys")
 
