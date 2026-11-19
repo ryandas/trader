@@ -8,8 +8,8 @@ evidence. State is persisted to Postgres for reporting and for Claude to read.
 ONE ACCOUNT: the swing and momentum sleeves share a single cash balance (`ledger.run`; the arbitration rule is in
 that module's docstring). The account's start, opening capital and monthly contribution are not stored separately:
 they are derived at sync time from the frozen sleeve records (the earliest-starting sleeve defines them), so there is
-no extra state to drift. Research candidate sleeves (`cand_*`) are NOT part of the account: each is an isolated
-research replay with its own capital.
+no extra state to drift. Promoted research candidates (`cand_*`) are further sleeves of the account (provisional): no
+capital or deposit of their own, funded from the account's cash; the `capital` in their record is ignored.
 """
 from __future__ import annotations
 
@@ -146,22 +146,6 @@ def _init_momentum(con, cfg, start, params, liquid_top, reset) -> dict:
     return mm
 
 
-def _replay_rotation(
-    cfg: Config, prep: mom.MomPrep, entry: dict, asof: str | None, slug: str = "", tier: str = ""
-) -> tuple[MomState, pd.DataFrame, pd.DataFrame]:
-    """Deterministic replay of one rotation sleeve (momentum or a research candidate) from its start."""
-    p = mom.MomParams(**entry["params"])
-    mcfg = cfg.model_copy(update={"capital": entry["capital"]})
-    start, end = pd.Timestamp(entry["start"]), (pd.Timestamp(asof) if asof else None)
-    res = mom.run(mcfg, prep, p, start, end, emit_last=True, contribution=entry.get("contribution", 0.0))
-    if res.equity.empty:
-        raise SystemExit(f"No trading days on/after sleeve start {start.date()} yet. Update data.")
-    last = res.equity.index[-1]
-    pos, orders = _rotation_frames(prep, res, last)
-    return MomState(res, prep, p, entry.get("liquid_top"), start, entry["capital"], last, slug, tier,
-                    entry.get("contribution", 0.0)), pos, orders
-
-
 def _rotation_frames(prep: mom.MomPrep, res: mom.MomResult, last: pd.Timestamp) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Open positions and queued orders of a rotation sleeve as tables."""
     li = prep.dates.get_loc(last)
@@ -277,40 +261,50 @@ def _retire(con, slug) -> None:
     con.close()
 
 
-def _sync_candidates(cfg: Config, instruments: pd.DataFrame, meta: dict, asof: str | None, con) -> tuple[dict, dict]:
+def _candidate_specs(cfg: Config, instruments: pd.DataFrame, meta: dict) -> tuple[list, dict, dict]:
+    """Active candidate records as ledger specs, in PROMOTION order (the cash arbitration order; jsonb does not keep key
+    order, so sort on the `promoted` stamp). The record's `capital`/`contribution` are the research harness's and are
+    never read here: a folded candidate buys with the account's cash. Returns (specs, entries, errors)."""
     from .research import registry
 
-    states, errors, preps = {}, {}, {}
-    frames = {"cand_trades": [], "cand_equity": [], "cand_positions": [], "cand_orders": []}
-    for slug, e in meta.get("candidates", {}).items():
-        if not e.get("active"):
-            continue
+    specs, entries, errors, preps = [], {}, {}, {}
+    order = sorted(((e.get("promoted", ""), slug) for slug, e in meta.get("candidates", {}).items() if e.get("active")))
+    for _, slug in order:
+        e = meta["candidates"][slug]
         try:
             if registry.sha256(slug) != e["file_sha256"]:
-                errors[slug] = "candidate file changed since promotion (code freeze): sleeve not replayed"
+                errors[slug] = "candidate file changed since promotion (code freeze): sleeve not in the account replay"
                 continue
         except (SystemExit, FileNotFoundError):
-            errors[slug] = "candidate file missing: sleeve not replayed"
+            errors[slug] = "candidate file missing: sleeve not in the account replay"
             continue
         key = e["liquid_top"]
         if key not in preps:
-            preps[key] = mom.prepare(cfg.model_copy(update={"capital": e["capital"]}), instruments, key)
-        try:
-            state, pos, orders = _replay_rotation(cfg, preps[key], e, asof, slug, e.get("tier", ""))
-        except SystemExit as ex:  # e.g. no trading day on/after start yet
-            errors[slug] = str(ex)
-            continue
-        states[slug] = state
-        r = state.result
+            preps[key] = mom.prepare(cfg, instruments, key)
+        specs.append(ledger.CandSpec(slug, preps[key], mom.MomParams(**e["params"]), pd.Timestamp(e["start"])))
+        entries[slug] = e
+    return specs, entries, errors
+
+
+def _persist_candidates(con, acct: ledger.AccountResult, specs: list, entries: dict, last: pd.Timestamp) -> dict:
+    """Write the candidate sleeves' tables from the account replay and return their MomStates."""
+    states = {}
+    frames = {"cand_trades": [], "cand_equity": [], "cand_positions": [], "cand_orders": []}
+    for sp in specs:
+        r = acct.cands[sp.slug]
+        e = entries[sp.slug]
+        pos, orders = _rotation_frames(sp.prep, r, last)
+        states[sp.slug] = MomState(r, sp.prep, sp.params, e.get("liquid_top"), sp.start, 0.0, last, sp.slug,
+                                   e.get("tier", ""), 0.0)  # capital 0: it is funded from the account's cash
         for name, df in (("cand_trades", r.trades), ("cand_equity", r.equity.reset_index()), ("cand_positions", pos),
                          ("cand_orders", orders)):
             if len(df):
-                frames[name].append(df.assign(sleeve=slug))
+                frames[name].append(df.assign(sleeve=sp.slug))
     with con:
         for name, parts in frames.items():
             df = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame({"sleeve": []})
             con.to_sql(df, name)
-    return states, errors
+    return states
 
 
 def strategies_from(params: dict) -> dict[str, Strategy]:
@@ -353,10 +347,15 @@ def _sync(con, cfg, instruments, asof) -> PaperState:
     if mm:
         mprep = mom.prepare(cfg, instruments, mm["liquid_top"])
         mo = ledger.MomSpec(mprep, mom.MomParams(**mm["params"]), pd.Timestamp(mm["start"]))
-    acct = ledger.run(cfg, spec, swing=sw, mom=mo, end=end, emit_last=True)  # ONE replay, ONE cash balance
+    cspecs, centries, cand_errors = _candidate_specs(cfg, instruments, meta)
+    # ONE replay, ONE cash balance: swing, momentum and promoted candidates all draw on it
+    acct = ledger.run(cfg, spec, swing=sw, mom=mo, end=end, emit_last=True, cands=cspecs)
     if acct.equity.empty:
         raise SystemExit(f"No trading days on/after ledger start {spec.start.date()} yet. Update data.")
     last = acct.equity.index[-1]
+    for sp in [s for s in cspecs if acct.cands[s.slug].equity.empty]:  # promoted after the replay's last session
+        cand_errors[sp.slug] = f"starts {sp.start.date()}, after the last session replayed"
+        cspecs.remove(sp)
     mkt_prep = prep if prep is not None else mprep
     regime = NAMES[int(mkt_prep.mkt[mkt_prep.dates.get_loc(last)])]
 
@@ -384,7 +383,7 @@ def _sync(con, cfg, instruments, asof) -> PaperState:
             con.to_sql(r.equity.reset_index(), "mom_equity")  # date, value: the sleeve's positions value
             con.to_sql(pos, "mom_positions")
             con.to_sql(morders, "mom_orders")
-    cands, cand_errors = _sync_candidates(cfg, instruments, meta, asof, con)
+    cands = _persist_candidates(con, acct, cspecs, centries, last)
     con.close()
     stale = asof is None and is_stale(last, store.last_complete_day())
     return PaperState(acct.swing, prep, last, regime, start, capital, stale, mstate, cands, cand_errors, acct, spec)

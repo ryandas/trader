@@ -13,7 +13,7 @@ from trader import backtest as bt
 from trader import ledger, outputs, paper, report
 from trader import momentum as mom
 from trader.accounting import CashBox
-from trader.config import Config
+from trader.config import AccountCfg, Config
 from trader.selector import Selector
 from trader.strategies import ALL
 
@@ -33,7 +33,9 @@ def acct(monkeypatch):
     frames = _frames()
     patch_candles(monkeypatch, frames)
     inst = pd.DataFrame({"symbol": [f"S{i}" for i in range(8)], "sector": list("AABBCCDD")})
-    cfg = Config(capital=CAPITAL, monthly_contribution=DEPOSIT)
+    # cap off here: these tests check engine equivalence with the single-sleeve backtests (the cap is tested in
+    # test_account_candidates.py)
+    cfg = Config(capital=CAPITAL, monthly_contribution=DEPOSIT, account=AccountCfg(max_sleeve_share=1.0))
     strats = {f"{n}#0": ALL[n]() for n in ALL}
     for k, s in strats.items():
         s.key = k

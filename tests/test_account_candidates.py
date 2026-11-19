@@ -15,14 +15,14 @@ from test_research import HONEST, _ledger, lab  # noqa: F401  (lab is a fixture)
 from trader import backtest as bt
 from trader import ledger, paper
 from trader import momentum as mom
-from trader.config import ROOT, Config
+from trader.config import ROOT, AccountCfg, Config
 from trader.selector import Selector
 
 CP = mom.MomParams(lookback=60, skip=5, top_n=3, buffer=2)  # a candidate sleeve: different ranking, 3 names
 
 
 def _cfg(acct, share):
-    return acct[0].model_copy(update=dict(account=dict(max_sleeve_share=share)))
+    return acct[0].model_copy(update=dict(account=AccountCfg(max_sleeve_share=share)))
 
 
 def _run(acct, share=1.0, n_cands=1, end_i=520, start_i=300, cand_start_i=300, with_swing=True):
@@ -65,7 +65,7 @@ def test_a_candidate_started_later_changes_nothing_before_its_start(acct):
 
 
 def _open(acct, cash, share, momq=None, swingq=None, candq=(), d=400):
-    """One shared open with queued buys: momentum (sym, target), swing (symbol, qty), candidates [(sym, target), ...]."""
+    """One shared open with queued buys: momentum (sym, target), swing (symbol, value), candidates [(sym, target), ...]."""
     cfg, idx, sprep, mprep, box, swing, mbook = _books(acct, cash)
     cbooks = [mom.MomBook(cfg, mprep, CP, box) for _ in candq]
     if momq:
@@ -73,7 +73,7 @@ def _open(acct, cash, share, momq=None, swingq=None, candq=(), d=400):
     if swingq:
         px = float(sprep.data[swingq[0]].o[d])
         swing.pending = [bt.Order(swingq[0], "breakout", "breakout#0", 2, "open", None, None, px * 0.5, None,
-                                  swingq[1], px, None)]
+                                  int(swingq[1] // px), px, None)]
     for b, q in zip(cbooks, candq):
         b.buys = [(mprep.syms.index(q[0]), q[1])]
     ledger.open_session(d, swing, mbook, cfg.min_size_fraction, cands=cbooks, max_share=share)
@@ -81,12 +81,13 @@ def _open(acct, cash, share, momq=None, swingq=None, candq=(), d=400):
 
 
 def test_arbitration_buys_go_momentum_then_swing_then_candidates(acct):
-    # momentum takes 6,000 of 10,000; swing wants far more and takes what is left; the candidate gets nothing
-    box, swing, mbook, (c0,), mprep, _ = _open(acct, 10_000.0, 1.0, momq=("S3", 6_000.0), swingq=("S5", 1000),
-                                               candq=[("S6", 6_000.0)])
+    # momentum takes 6,000 of 10,000; swing wants 7,000 and is cut to what is left (~4,000); the candidate gets nothing
+    box, swing, mbook, (c0,), mprep, sprep = _open(acct, 10_000.0, 1.0, momq=("S3", 6_000.0), swingq=("S5", 7_000.0),
+                                                   candq=[("S6", 6_000.0)])
     si = mprep.syms.index("S3")
     assert mbook.pos[si]["qty"] == int(6_000.0 // (mbook.pos[si]["px"] * 1.004))
-    assert "S5" in swing.positions and swing.positions["S5"].qty < 1000  # cut to the cash that was left
+    intended = int(7_000.0 // float(sprep.data["S5"].o[400]))
+    assert "S5" in swing.positions and swing.positions["S5"].qty < intended  # cut to the cash that was left
     assert not c0.pos
     assert box.value >= 0
 
@@ -110,12 +111,12 @@ def test_sells_of_every_sleeve_come_before_any_buy(acct):
 
 
 def test_sleeve_cap_cuts_a_buy_and_skips_it_below_min_size(acct):
-    # 40% of equity 10,000 = 4,000: a 9,000 target is cut to the cap and taken
-    box, _, mbook, _, mprep, _ = _open(acct, 10_000.0, 0.4, momq=("S3", 9_000.0))
+    # 40% of equity 10,000 = 4,000: a 6,000 target is cut to the cap (67% of intended) and taken
+    box, _, mbook, _, mprep, _ = _open(acct, 10_000.0, 0.4, momq=("S3", 6_000.0))
     q = mbook.pos[mprep.syms.index("S3")]
     assert 0.3 * 10_000.0 < q["qty"] * q["px"] <= 0.4 * 10_000.0  # cut TO the cap, not skipped
     # a 2% cap leaves room for under half the intended quantity: skipped, like a cash-short buy
-    box, _, mbook, _, mprep, _ = _open(acct, 10_000.0, 0.02, momq=("S3", 9_000.0))
+    box, _, mbook, _, mprep, _ = _open(acct, 10_000.0, 0.02, momq=("S3", 6_000.0))
     assert not mbook.pos and box.value == 10_000.0
 
 
@@ -126,9 +127,10 @@ def test_cap_applies_to_every_sleeve_and_counts_what_the_sleeve_already_holds(ac
     held = mprep.syms.index("S1")
     cbook.pos[held] = {"qty": 10, "px": float(mprep.o[d, held]), "cost": 0.0, "d": d - 5}
     equity = 10_000.0 + 10 * float(mprep.o[d, held])
-    cbook.buys = [(mprep.syms.index("S6"), 9_000.0)]
+    cbook.buys = [(mprep.syms.index("S6"), 6_000.0)]
     px = float(sprep.data["S5"].o[d])
-    swing.pending = [bt.Order("S5", "breakout", "breakout#0", 2, "open", None, None, px * 0.5, None, 10_000, px, None)]
+    swing.pending = [bt.Order("S5", "breakout", "breakout#0", 2, "open", None, None, px * 0.5, None,
+                              int(6_000 // px), px, None)]
     ledger.open_session(d, swing, mbook, cfg.min_size_fraction, cands=[cbook], max_share=0.4)
     cand_value = sum(q["qty"] * mprep.o[d, si] for si, q in cbook.pos.items())
     assert cand_value <= 0.4 * equity * 1.0001  # the existing holding counts toward the cap

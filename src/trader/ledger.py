@@ -13,6 +13,16 @@ Design (owner decision, 2026-11-19): the ledger is a single cash account, not on
     2. then buys: momentum's rebalance buys BEFORE swing's entries, so a month-end rebalance is never starved by swing;
     3. a buy is cut to the cash left; if the cut quantity is below `min_size_fraction` (0.5) of the intended quantity the
        buy is skipped. Cash never goes negative.
+- PROMOTED RESEARCH CANDIDATES (provisional, owner decision 2026-11-19) are further sleeves of this account (`CandSpec`).
+  A candidate brings NO money: its positions are bought with the account's cash, it adds no deposit (the single
+  month-end deposit is the only one), and its value counts toward account equity. Its promotion record's `capital` is the
+  research harness's and is never read here. Its targets are a 1/top_n share of TOTAL account equity, like momentum's.
+  Candidates buy last, after momentum and swing, in promotion order. Research itself (`research-eval`, the trial
+  registry) stays unfolded and does not touch the account.
+- SLEEVE CAP (provisional): a sleeve's positions (momentum, swing, each candidate) may not exceed
+  `account.max_sleeve_share` (config.yaml, default 0.40) of account equity at the open. A buy is cut so the sleeve stays
+  within the cap (what it already holds counts) and skipped below `min_size_fraction` of its intended size. 1.0 = no cap.
+  Note momentum alone targets ~100% of equity, so the cap binds it too.
   Orders are queued from the previous close without reserving cash against each other; arbitration happens only when
   they fill, so the result does not depend on which sleeve is listed first in the code path that queues them.
 - Like every sleeve, the account is a deterministic replay from its start date with frozen parameters (`paper.py`).
@@ -23,6 +33,8 @@ harness stay single-sleeve (`backtest.run`, `momentum.run`), each with its own p
 """
 from __future__ import annotations
 
+import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -58,23 +70,49 @@ class MomSpec:
 
 
 @dataclass
+class CandSpec:
+    """A promoted research candidate folded into the account. It has NO capital and NO contribution of its own: it
+    buys with the account's cash and its value counts toward account equity. (The `capital` in its promotion record
+    belongs to the research harness and is ignored here.)"""
+    slug: str
+    prep: mm.MomPrep
+    params: mm.MomParams
+    start: pd.Timestamp
+
+
+@dataclass
 class AccountResult:
-    equity: pd.DataFrame  # index date; equity (time-weighted), invested (fraction), value, cash, swing_value, mom_value, deposited
+    equity: pd.DataFrame  # index date; equity (time-weighted), invested (fraction), value, cash, swing_value, mom_value, cand_value, deposited
     swing: bt.Result | None = None  # sleeve result: trades, open positions, queued orders; equity has column `value`
     mom: mm.MomResult | None = None  # same for the momentum sleeve
     cash: float = 0.0
+    cands: dict = field(default_factory=dict)  # slug -> mm.MomResult, in promotion order
     extra: dict = field(default_factory=dict)
 
 
-def open_session(d: int, swing: bt.SwingBook | None, mbook: mm.MomBook | None, min_fraction: float) -> None:
-    """The cash arbitration rule: all sells and exits, then momentum buys, then swing buys (see module docstring)."""
+def open_session(d: int, swing: bt.SwingBook | None, mbook: mm.MomBook | None, min_fraction: float,
+                 cands: Sequence[mm.MomBook] = (), max_share: float = 1.0) -> None:
+    """The cash arbitration rule: all sells and exits (every sleeve) first, then buys in the order momentum, swing,
+    candidates (promotion order). Each buy is cut to the cash left and to the sleeve cap (`max_share` of account equity
+    at the open, counting what the sleeve already holds) and skipped below `min_fraction` of its intended size."""
     if swing is not None:
         swing.exits(d)
     if mbook is not None:
         mbook.sell_at_open(d)
-        mbook.buy_at_open(d, min_fraction)
+    for c in cands:
+        c.sell_at_open(d)
+    books = ([swing] if swing is not None else []) + ([mbook] if mbook is not None else []) + list(cands)
+    equity = (swing or mbook or cands[0]).cash.value + sum(b.value_at_open(d) for b in books)  # at the open, after sells
+
+    def room(b) -> float:
+        return math.inf if max_share >= 1.0 else max(max_share * equity - b.value_at_open(d), 0.0)
+
+    if mbook is not None:
+        mbook.buy_at_open(d, min_fraction, room(mbook))
     if swing is not None:
-        swing.fills(d, min_fraction)
+        swing.fills(d, min_fraction, room(swing))
+    for c in cands:
+        c.buy_at_open(d, min_fraction, room(c))
 
 
 def run(
@@ -84,14 +122,16 @@ def run(
     mom: MomSpec | None = None,
     end: pd.Timestamp | None = None,
     emit_last: bool = False,
+    cands: Sequence[CandSpec] = (),
 ) -> AccountResult:
     """Replay the account from `account.start` to `end` (default: last bar). `emit_last` also queues orders from the
-    final close (paper trading)."""
+    final close (paper trading). `cands` are promoted research candidates in promotion order: they buy with the
+    account's cash, add no deposit, and count toward account equity."""
     if swing is None and mom is None:
-        raise ValueError("an account needs at least one sleeve")
+        raise ValueError("an account needs a swing or momentum sleeve")
     dates = (swing.prep if swing else mom.prep).dates
-    if swing and mom and not swing.prep.dates.equals(mom.prep.dates):
-        raise ValueError("swing and momentum preps cover different dates; they must be built from the same candles")
+    if any(not s.prep.dates.equals(dates) for s in [x for x in (swing, mom) if x] + list(cands)):
+        raise ValueError("sleeve preps cover different dates; they must be built from the same candles")
     i0 = int(dates.searchsorted(account.start))
     i1 = int(dates.searchsorted(end, side="right")) if end is not None else len(dates)
     month_end = mm.month_end_mask(dates)  # deposit days: last session of each month
@@ -102,28 +142,39 @@ def run(
     mbook = mm.MomBook(cfg, mom.prep, mom.params, cash) if mom else None
     s0 = int(dates.searchsorted(swing.start)) if swing else None
     m0 = int(dates.searchsorted(mom.start)) if mom else None
-    rows, s_rows, m_rows = [], [], []
+    cbooks = [mm.MomBook(cfg, c.prep, c.params, cash) for c in cands]  # same box: no capital of their own
+    c0 = [int(dates.searchsorted(c.start)) for c in cands]
+    rows, s_rows, m_rows, c_rows = [], [], [], [[] for _ in cands]
 
     for d in range(i0, i1):
         s_on, m_on = swing is not None and d >= s0, mom is not None and d >= m0
-        open_session(d, sbook, mbook, cfg.min_size_fraction)
+        open_session(d, sbook, mbook, cfg.min_size_fraction, cbooks, cfg.account.max_sleeve_share)
         s_val = sbook.end_of_day(d) if sbook else 0.0
         m_val = mbook.invested(d) if mbook else 0.0
-        nav, value, deposited = navs.mark(cash, s_val + m_val, bool(month_end[d]))
-        rows.append((dates[d], nav, (s_val + m_val) / value if value > 0 else 0.0, value, cash.value, s_val, m_val, deposited))
+        c_vals = [b.invested(d) for b in cbooks]
+        c_val = sum(c_vals)
+        nav, value, deposited = navs.mark(cash, s_val + m_val + c_val, bool(month_end[d]))
+        rows.append((dates[d], nav, (s_val + m_val + c_val) / value if value > 0 else 0.0, value, cash.value, s_val, m_val,
+                     c_val, deposited))
         if s_on:
             s_rows.append((dates[d], s_val))
         if m_on:
             m_rows.append((dates[d], m_val))
+        for k, v in enumerate(c_vals):
+            if d >= c0[k]:
+                c_rows[k].append((dates[d], v))
         if d == i1 - 1 and not emit_last:
             continue
-        if m_on:  # sleeve targets and risk are measured against TOTAL account value (cash + both sleeves)
+        if m_on:  # sleeve targets and risk are measured against TOTAL account value (cash + all sleeves)
             mbook.decide(d, value)
         if s_on:
             sbook.decide(d, value)
+        for k, b in enumerate(cbooks):
+            if d >= c0[k]:
+                b.decide(d, value)
 
     eq = pd.DataFrame(rows, columns=["date", "equity", "invested", "value", "cash", "swing_value", "mom_value",
-                                     "deposited"]).set_index("date")
+                                     "cand_value", "deposited"]).set_index("date")
     years = max((eq.index[-1] - eq.index[0]).days / 365.25, 1e-9) if len(eq) else 1
     avg = eq["value"].mean() if len(eq) else 1.0
     s_res = bt.Result(pd.DataFrame(sbook.trades), pd.DataFrame(s_rows, columns=["date", "value"]).set_index("date"),
@@ -132,4 +183,8 @@ def run(
         pd.DataFrame(mbook.trades), pd.DataFrame(m_rows, columns=["date", "value"]).set_index("date"),
         mbook.pos, mbook.sells, mbook.buys, mbook.traded_value / avg / years,
     ) if mbook else None
-    return AccountResult(eq, s_res, m_res, cash.value)
+    c_res = {c.slug: mm.MomResult(
+        pd.DataFrame(b.trades), pd.DataFrame(rows_k, columns=["date", "value"]).set_index("date"),
+        b.pos, b.sells, b.buys, b.traded_value / avg / years,
+    ) for c, b, rows_k in zip(cands, cbooks, c_rows)}
+    return AccountResult(eq, s_res, m_res, cash.value, c_res)
