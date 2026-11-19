@@ -37,14 +37,16 @@ def _table(sql: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def _draw_table(ax, title: str, header: list[str], rows: list[list[str]], empty: str) -> None:
+def _draw_table(ax, title: str, header: list[str], rows: list[list[str]], empty: str,
+                 col_widths: list[float] | None = None) -> None:
     """A table filling its whole axes. The axes height is set from the row count by the caller."""
     ax.axis("off")
     ax.set_title(title, loc="left", fontsize=10, weight="bold")
     if not rows:
         ax.text(0.5, 0.5, empty, ha="center", va="center", transform=ax.transAxes, color="#666666")
         return
-    t = ax.table(cellText=rows, colLabels=header, loc="center", cellLoc="center", bbox=[0, 0, 1, 1])
+    t = ax.table(cellText=rows, colLabels=header, loc="center", cellLoc="center", bbox=[0, 0, 1, 1],
+                    colWidths=col_widths)
     t.auto_set_font_size(False)
     t.set_fontsize(9)
 
@@ -71,8 +73,8 @@ def build(out: Path) -> Path:
         mv, pnl = float(r.last_close) * int(r.qty), (float(r.last_close) - float(r.entry_price)) * int(r.qty)
         swing_rows.append([r.sym, r.strat, str(int(r.qty)), f"{float(r.entry_price):.2f}", f"{float(r.last_close):.2f}",
                            f"{pnl:+,.0f}", f"{mv:,.0f}", f"{float(r.stop):.2f}"])
-    order_rows = [["Swing", "BUY", r.sym, f"{r.entry_type}, qty {int(r.qty)}, est {float(r.est_entry):.2f}"
-                   + (f", max {float(r.max_entry):.2f}" if pd.notna(r.max_entry) else "") + f", stop {float(r.stop):.2f}"]
+    order_rows = [["Swing", "BUY", r.sym, f"{int(r.qty)} @ {r.entry_type} · est {float(r.est_entry):.2f}"
+                   + (f" · max {float(r.max_entry):.2f}" if pd.notna(r.max_entry) else "") + f" · stop {float(r.stop):.2f}"]
                   for r in swing_ord.itertuples()]
     order_rows += [["Momentum", str(r.side).upper(), r.symbol,
                     (f"rebalance, target ₹{float(r.target_value):,.0f}" if pd.notna(r.target_value) else str(r.reason))]
@@ -135,7 +137,8 @@ def build(out: Path) -> Path:
     _draw_table(fig.add_subplot(gs[3]), f"Swing open positions ({len(swing_rows)})",
                 ["Sym", "Strat", "Qty", "Entry", "Last", "P/L ₹", "Value ₹", "Stop"], swing_rows, "No swing positions")
     _draw_table(fig.add_subplot(gs[4]), f"Queued for the next session ({len(order_rows)})",
-                ["Sleeve", "Side", "Sym", "Detail"], order_rows, "No orders queued")
+                ["Sleeve", "Side", "Sym", "Detail"], order_rows, "No orders queued",
+                col_widths=[0.12, 0.07, 0.15, 0.66])
 
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=130)
