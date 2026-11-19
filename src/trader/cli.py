@@ -219,18 +219,19 @@ def daily(
         update(None, "yfinance")  # refresh the whole universe + benchmark
     st = paper.sync(cfg, instruments, asof)
     md, csv = report.write_report(cfg, st)  # references like "trader show daily <date>"
+    typer.echo(f"{st.last_date.date()} | regime {st.regime}")
+    a = st.account.equity.iloc[-1]  # one shared cash account: cash + swing positions + momentum positions
+    typer.echo(f"account | equity {a['value']:,.0f} | cash {a['cash']:,.0f} | paid in {a['deposited']:,.0f}")
     if st.result is not None:
         r = st.result
         typer.echo(
-            f"swing sleeve | {st.last_date.date()} | regime {st.regime} | equity {r.equity['equity'].iloc[-1]:,.0f} | "
-            f"{len(r.positions)} open | {len(r.pending)} orders for next session"
+            f"swing sleeve | positions {a['swing_value']:,.0f} | {len(r.positions)} open | "
+            f"{len(r.pending)} orders for next session"
         )
-    else:
-        typer.echo(f"{st.last_date.date()} | regime {st.regime}")
     if st.mom:
         m = st.mom.result
         typer.echo(
-            f"momentum sleeve | value {m.equity['value'].iloc[-1]:,.0f} (paid in {m.equity['deposited'].iloc[-1]:,.0f}) | {len(m.positions)} holdings | "
+            f"momentum sleeve | positions {a['mom_value']:,.0f} | {len(m.positions)} holdings | "
             f"{len(m.pending_sells)} sells, {len(m.pending_buys)} buys queued"
         )
     for slug, cs in st.cands.items():

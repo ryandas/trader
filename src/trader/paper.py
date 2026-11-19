@@ -1,9 +1,15 @@
 """Paper-trading ledger.
 
-The ledger is a deterministic replay of the backtest engine (same fills, costs, sizing and
+The ledger is a deterministic replay of the backtest engines (same fills, costs, sizing and
 risk rules) from a fixed start date, using parameters and selector statistics FROZEN at init.
 Nothing fitted after the start date can leak into it, so its results are genuine forward
-evidence. State is persisted to SQLite (data/paper.db) for reporting and for Claude to read.
+evidence. State is persisted to Postgres for reporting and for Claude to read.
+
+ONE ACCOUNT: the swing and momentum sleeves share a single cash balance (`ledger.run`; the arbitration rule is in
+that module's docstring). The account's start, opening capital and monthly contribution are not stored separately:
+they are derived at sync time from the frozen sleeve records (the earliest-starting sleeve defines them), so there is
+no extra state to drift. Research candidate sleeves (`cand_*`) are NOT part of the account: each is an isolated
+research replay with its own capital.
 """
 from __future__ import annotations
 
@@ -15,6 +21,7 @@ import numpy as np
 import pandas as pd
 
 from . import backtest as bt
+from . import ledger
 from . import momentum as mom
 from . import sessions
 from . import db, outputs
@@ -53,6 +60,8 @@ class PaperState:
     mom: MomState | None = None
     cands: dict = field(default_factory=dict)  # slug -> MomState for active research candidate sleeves
     cand_errors: dict = field(default_factory=dict)  # slug -> reason the sleeve was not replayed
+    account: ledger.AccountResult | None = None  # the shared cash account (swing + momentum)
+    account_spec: ledger.AccountSpec | None = None
 
 
 def _db(cfg: Config) -> db.Con:
@@ -69,7 +78,7 @@ def _put_meta(con: db.Con, key: str, value) -> None:
 
 
 SWING_TABLES = ("trades", "equity", "positions", "orders")
-SWING_KEYS = ("start", "capital", "params", "selector", "created", "last_date", "regime")
+SWING_KEYS = ("start", "capital", "params", "selector", "created", "last_date", "regime", "contribution")
 
 
 def _drop_swing(con: db.Con) -> None:
@@ -98,6 +107,7 @@ def init(cfg: Config, start: pd.Timestamp, reset: bool = False) -> dict:
     meta = {
         "start": str(start.date()),
         "capital": cfg.capital,
+        "contribution": cfg.monthly_contribution,
         "params": params,
         "selector": sel,
         "created": datetime.now().isoformat(timespec="seconds"),
@@ -122,6 +132,7 @@ def init_momentum(
 
 
 def _init_momentum(con, cfg, start, params, liquid_top, reset) -> dict:
+    # The momentum sleeve records its own start/capital/contribution; the shared account derives from these (see account_spec).
     meta = _meta(con)
     if "momentum" in meta and not reset:
         raise SystemExit("A momentum sleeve already exists. Use --reset to discard it and start over.")
@@ -146,6 +157,13 @@ def _replay_rotation(
     if res.equity.empty:
         raise SystemExit(f"No trading days on/after sleeve start {start.date()} yet. Update data.")
     last = res.equity.index[-1]
+    pos, orders = _rotation_frames(prep, res, last)
+    return MomState(res, prep, p, entry.get("liquid_top"), start, entry["capital"], last, slug, tier,
+                    entry.get("contribution", 0.0)), pos, orders
+
+
+def _rotation_frames(prep: mom.MomPrep, res: mom.MomResult, last: pd.Timestamp) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Open positions and queued orders of a rotation sleeve as tables."""
     li = prep.dates.get_loc(last)
     pos = pd.DataFrame(
         [{"symbol": prep.syms[si], "qty": q["qty"], "entry_price": q["px"], "entry_date": str(prep.dates[q["d"]].date()),
@@ -155,24 +173,27 @@ def _replay_rotation(
         [{"side": "sell", "symbol": prep.syms[si], "reason": why, "target_value": None} for si, why in res.pending_sells.items()]
         + [{"side": "buy", "symbol": prep.syms[si], "reason": "rebalance", "target_value": tv} for si, tv in res.pending_buys],
         columns=["side", "symbol", "reason", "target_value"])
-    return MomState(res, prep, p, entry.get("liquid_top"), start, entry["capital"], last, slug, tier,
-                    entry.get("contribution", 0.0)), pos, orders
+    return pos, orders
 
 
-def _sync_momentum(cfg: Config, instruments: pd.DataFrame, meta: dict, asof: str | None, con) -> MomState | None:
-    mm = meta.get("momentum")
-    if not mm:
+def account_spec(meta: dict) -> ledger.AccountSpec | None:
+    """Start, opening cash and monthly deposit of the shared account, derived from the frozen sleeve records.
+
+    The earliest-starting sleeve defines them (a tie goes to momentum). A swing record written before the account
+    existed has no `contribution`; it then takes the other sleeve's value, else 0. Nothing here is stored or mutable."""
+    recs = []
+    if "momentum" in meta:
+        m = meta["momentum"]
+        recs.append((pd.Timestamp(m["start"]), 0, m["capital"], m.get("contribution")))
+    if "params" in meta:
+        recs.append((pd.Timestamp(meta["start"]), 1, meta["capital"], meta.get("contribution")))
+    if not recs:
         return None
-    prep = mom.prepare(cfg.model_copy(update={"capital": mm["capital"]}), instruments, mm["liquid_top"])
-    state, pos, orders = _replay_rotation(cfg, prep, mm, asof)
-    res = state.result
-    trades = res.trades if len(res.trades) else pd.DataFrame(columns=["symbol", "net_pnl"])
-    with con:
-        con.to_sql(trades, "mom_trades")
-        con.to_sql(res.equity.reset_index(), "mom_equity")
-        con.to_sql(pos, "mom_positions")
-        con.to_sql(orders, "mom_orders")
-    return state
+    recs.sort(key=lambda r: (r[0], r[1]))
+    start, _, capital, contribution = recs[0]
+    if contribution is None:
+        contribution = next((r[3] for r in recs if r[3] is not None), 0.0)
+    return ledger.AccountSpec(start=start, capital=capital, contribution=contribution)
 
 
 # ---------------------------------------------------------------- research candidate sleeves
@@ -320,36 +341,50 @@ def _sync(con, cfg, instruments, asof) -> PaperState:
     if "params" not in meta and "momentum" not in meta:
         raise SystemExit("No paper ledger. Run `trader paper-momentum` (or `trader paper-init`) first.")
     end = pd.Timestamp(asof) if asof else None
-    res = prep = start = capital = None
-    last = regime = None
+    spec = account_spec(meta)
+    sw = mo = None
+    prep = mprep = start = capital = None
     if "params" in meta:
         strats = strategies_from(meta["params"])
-        sel = Selector.from_dict(meta["selector"])
-        pcfg = cfg.model_copy(update={"capital": meta["capital"]})
-        prep = bt.prepare(pcfg, instruments, list(strats.values()), filters=True)
+        prep = bt.prepare(cfg, instruments, list(strats.values()), filters=True)
         start, capital = pd.Timestamp(meta["start"]), meta["capital"]
-        res = bt.run(pcfg, prep, strats, start, end, sel, emit_last=True)
-        if res.equity.empty:
-            raise SystemExit(f"No trading days on/after paper start {start.date()} yet. Update data.")
-        last = res.equity.index[-1]
-        regime = NAMES[int(prep.mkt[prep.dates.get_loc(last)])]
+        sw = ledger.SwingSpec(prep, strats, Selector.from_dict(meta["selector"]), start)
+    mm = meta.get("momentum")
+    if mm:
+        mprep = mom.prepare(cfg, instruments, mm["liquid_top"])
+        mo = ledger.MomSpec(mprep, mom.MomParams(**mm["params"]), pd.Timestamp(mm["start"]))
+    acct = ledger.run(cfg, spec, swing=sw, mom=mo, end=end, emit_last=True)  # ONE replay, ONE cash balance
+    if acct.equity.empty:
+        raise SystemExit(f"No trading days on/after ledger start {spec.start.date()} yet. Update data.")
+    last = acct.equity.index[-1]
+    mkt_prep = prep if prep is not None else mprep
+    regime = NAMES[int(mkt_prep.mkt[mkt_prep.dates.get_loc(last)])]
 
+    with con:
         # explicit columns so empty frames still create valid tables
-        orders = pd.DataFrame([asdict(o) for o in res.pending], columns=[f.name for f in fields(bt.Order)])
-        positions = pd.DataFrame([asdict(p) for p in res.positions], columns=[f.name for f in fields(bt.Position)])
-        trades = res.trades if len(res.trades) else pd.DataFrame(columns=["symbol", "strategy", "net_pnl"])
-        with con:
+        con.to_sql(acct.equity.reset_index(), "account_equity")
+        if sw:
+            res = acct.swing
+            orders = pd.DataFrame([asdict(o) for o in res.pending], columns=[f.name for f in fields(bt.Order)])
+            positions = pd.DataFrame([asdict(p) for p in res.positions], columns=[f.name for f in fields(bt.Position)])
+            trades = res.trades if len(res.trades) else pd.DataFrame(columns=["symbol", "strategy", "net_pnl"])
             con.to_sql(trades, "trades")
-            con.to_sql(res.equity.reset_index(), "equity")
+            con.to_sql(res.equity.reset_index(), "equity")  # date, value: the sleeve's positions value
             con.to_sql(positions, "positions")
             con.to_sql(orders, "orders")
             for k, v in (("last_date", str(last.date())), ("regime", regime)):
                 _put_meta(con, k, v)
-    mstate = _sync_momentum(cfg, instruments, meta, asof, con)
+        mstate = None
+        if mo:
+            r = acct.mom
+            mstate = MomState(r, mprep, mo.params, mm["liquid_top"], mo.start, mm["capital"], last,
+                              contribution=mm.get("contribution", 0.0))
+            pos, morders = _rotation_frames(mprep, r, last)
+            con.to_sql(r.trades if len(r.trades) else pd.DataFrame(columns=["symbol", "net_pnl"]), "mom_trades")
+            con.to_sql(r.equity.reset_index(), "mom_equity")  # date, value: the sleeve's positions value
+            con.to_sql(pos, "mom_positions")
+            con.to_sql(morders, "mom_orders")
     cands, cand_errors = _sync_candidates(cfg, instruments, meta, asof, con)
     con.close()
-    if last is None:  # momentum-only ledger
-        last = mstate.last_date
-        regime = NAMES[int(mstate.prep.mkt[mstate.prep.dates.get_loc(last)])]
     stale = asof is None and is_stale(last, store.last_complete_day())
-    return PaperState(res, prep, last, regime, start, capital, stale, mstate, cands, cand_errors)
+    return PaperState(acct.swing, prep, last, regime, start, capital, stale, mstate, cands, cand_errors, acct, spec)

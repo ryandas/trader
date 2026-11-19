@@ -38,16 +38,61 @@ MOM_CAVEAT = (
     "edge shrank below the index. Only this forward ledger is unbiased."
 )
 
+ARBITRATION = (
+    "Both sleeves draw on this one cash balance. On a shared session all sells/exits run first, then momentum's "
+    "rebalance buys, then swing's entries; a buy is cut to the cash left and skipped if that is under half its "
+    "intended size. Momentum targets and swing risk are measured against total account equity."
+)
 
-def _momentum_section(cfg: Config, m: MomState, day, orders_out: dict) -> str:
+
+def _account_section(st: PaperState) -> str:
+    """The account: cash + each sleeve's positions = account equity, so the sections add up by construction."""
+    a, spec = st.account, st.account_spec
+    e = a.equity
+    last = e.iloc[-1]
+    paid = float(last["deposited"])
+    twr = 100 * (float(last["equity"]) / spec.capital - 1)  # time-weighted: deposits are not profit
+    rows = [{"component": "Cash", "inr": f"{last['cash']:,.0f}"}]
+    if a.swing is not None:
+        rows.append({"component": f"Swing sleeve positions ({len(a.swing.positions)} open)", "inr": f"{last['swing_value']:,.0f}"})
+    if a.mom is not None:
+        rows.append({"component": f"Momentum sleeve positions ({len(a.mom.positions)} holdings)", "inr": f"{last['mom_value']:,.0f}"})
+    rows.append({"component": "**Account equity**", "inr": f"**{last['value']:,.0f}**"})
+    return f"""## Account (one shared cash account)
+- Ledger start {spec.start.date()} | Paid in ₹{paid:,.0f} (₹{spec.capital:,.0f} start + ₹{spec.contribution:,.0f} once per month-end) | Account equity ₹{last['value']:,.0f} | Profit ₹{last['value'] - paid:+,.0f} | Time-weighted return {twr:+.2f}%
+- {ARBITRATION}
+
+{_md_table(pd.DataFrame(rows))}"""
+
+
+def _account_performance(st: PaperState, cfg: Config) -> str:
+    a = st.account
+    if len(a.equity) <= 1:
+        return "_ledger just started: no performance yet_"
+    parts = [t for t in (a.swing.trades if a.swing is not None else None, a.mom.trades if a.mom is not None else None)
+             if t is not None and len(t)]
+    cols = ["net_pnl", "bars_held", "costs"]
+    trades = pd.concat([t[cols] for t in parts], ignore_index=True) if parts else pd.DataFrame(columns=cols)
+    m = summarize(a.equity, trades, bt.load_benchmark(cfg))
+    return "\n".join(f"- {k}: {v}" for k, v in m.items())
+
+
+def _sleeve_pnl(trades: pd.DataFrame) -> str:
+    if not len(trades):
+        return "no closed trades yet"
+    return f"{len(trades)} closed trades, net P&L ₹{trades['net_pnl'].sum():+,.0f}, charges ₹{trades['costs'].sum():,.0f}"
+
+
+def _momentum_section(cfg: Config, st: PaperState, orders_out: dict) -> str:
+    m: MomState = st.mom
     r, prep = m.result, m.prep
+    value = float(st.account.equity["value"].iloc[-1])
     li = prep.dates.get_loc(m.last_date)
-    eq = r.equity["equity"]
     pos = pd.DataFrame([{
         "symbol": prep.syms[si], "qty": q["qty"], "entry": round(q["px"], 2),
         "last": round(float(prep.c[li, si]), 2), "days": li - q["d"],
         "unrealised": round((float(prep.c[li, si]) - q["px"]) * q["qty"]),
-        "weight_pct": round(100 * q["qty"] * float(prep.c[li, si]) / r.equity["value"].iloc[-1], 1),
+        "pct_of_account": round(100 * q["qty"] * float(prep.c[li, si]) / value, 1),
     } for si, q in r.positions.items()])
     orders = pd.DataFrame(
         [{"side": "SELL", "symbol": prep.syms[si], "reason": why, "approx_qty": "-"} for si, why in r.pending_sells.items()]
@@ -58,13 +103,6 @@ def _momentum_section(cfg: Config, m: MomState, day, orders_out: dict) -> str:
     nxt_txt = ("orders above fill at the next open" if prep.rebal[li]
                else f"next rebalance signal: close of {nxt} (orders fill the following open)")
     reg = {0: "BEAR (cash)", 1: "neutral", 2: "bull"}[int(prep.mkt[li])]
-    ret = 100 * (eq.iloc[-1] / m.capital - 1)  # time-weighted: deposits are not profit
-    val, paid = float(r.equity["value"].iloc[-1]), float(r.equity["deposited"].iloc[-1])
-    if len(r.equity) > 1:
-        mt = summarize(r.equity, r.trades, bt.load_benchmark(cfg))
-        perf = "\n".join(f"- {k}: {v}" for k, v in mt.items())
-    else:
-        perf = "_sleeve just started: no performance yet_"
     mwf = outputs.get("momentum-wf", "", "oos_equity")
     ev = ""
     if mwf is not None:
@@ -79,21 +117,19 @@ def _momentum_section(cfg: Config, m: MomState, day, orders_out: dict) -> str:
 > **Paper only.** {ev}{MOM_CAVEAT}
 
 - Params (frozen): `{m.params.label()}`{f", liquid top {m.liquid_top}" if m.liquid_top else ""}
-- Sleeve started {m.start.date()} | Value ₹{val:,.0f} on ₹{paid:,.0f} paid in (₹{m.capital:,.0f} start + ₹{m.contribution:,.0f} each month-end) | Time-weighted return {ret:+.2f}% | Invested {100 * r.equity["invested"].iloc[-1]:.0f}%
-- Market regime: **{reg}** | Holdings: {len(r.positions)}/{m.params.top_n} | {nxt_txt}
+- Sleeve started {m.start.date()} | Positions ₹{r.equity['value'].iloc[-1]:,.0f} ({100 * r.equity['value'].iloc[-1] / value:.0f}% of account) | {_sleeve_pnl(r.trades)}
+- Market regime: **{reg}** | Holdings: {len(r.positions)}/{m.params.top_n} (each new buy targets 1/{m.params.top_n} of account equity) | {nxt_txt}
 
 ## Momentum orders for next session
 {_md_table(orders)}
 ## Momentum holdings
-{_md_table(pos)}
-## Momentum performance since sleeve start
-{perf}
-"""
+{_md_table(pos)}"""
 
 
 CAND_CAVEAT = (
     "Research candidates trade on paper only, from their start date. A backtest PASS merely earned the right to be "
-    "paper traded; only these forward numbers count, and months of them are needed before they mean anything."
+    "paper traded; only these forward numbers count, and months of them are needed before they mean anything. "
+    "They are NOT part of the account above: each is an isolated replay with its own capital."
 )
 
 
@@ -132,32 +168,16 @@ def _candidates_section(cfg: Config, st: PaperState) -> str:
             blocks.append(f"## {title}\n{_md_table(pd.DataFrame(rows))}")
     if st.cand_errors:
         blocks.append("## Candidate sleeves NOT replayed\n" + "\n".join(f"- `{k}`: {v}" for k, v in st.cand_errors.items()) + "\n")
-    return f"\n---\n\n# Research candidate sleeves (paper)\n\n> **Paper only.** {CAND_CAVEAT}\n\n" + "\n".join(blocks)
+    return f"\n---\n\n# Research candidate sleeves (paper, outside the account)\n\n> **Paper only.** {CAND_CAVEAT}\n\n" + "\n".join(blocks)
 
 
 def _ref(day, item: str = "") -> str:
     return f"trader show daily {day}" + (f" {item}" if item else "")
 
 
-def _momentum_only_report(cfg: Config, st: PaperState) -> tuple[str, str]:
-    day = st.last_date.date()
-    items: dict = {}
-    warn = ("\n> **DATA MAY BE STALE** — latest bar is older than the last completed session. "
-            "Run `trader update`.\n" if st.stale else "")
-    section = _momentum_section(cfg, st.mom, day, items).replace("\n---\n\n", "\n", 1)
-    items["report"] = f"# Paper trading report: {day}\n{warn}{section}{_candidates_section(cfg, st)}"
-    outputs.save("daily", str(day), items, {"stale": st.stale})
-    return _ref(day), _ref(day, "momentum-orders")
-
-
-def write_report(cfg: Config, st: PaperState) -> tuple[str, str]:
-    """Store the day's report (and order tables) in the database; returns `trader show` references."""
-    if st.result is None:  # swing sleeve not in the ledger
-        return _momentum_only_report(cfg, st)
-    res, day = st.result, st.last_date.date()
-    eq = res.equity["equity"]
-    ret = 100 * (eq.iloc[-1] / st.capital - 1)
-
+def _swing_section(cfg: Config, st: PaperState, items: dict) -> str:
+    res = st.result
+    value = float(st.account.equity["value"].iloc[-1])
     pos = pd.DataFrame([{
         "symbol": p.sym, "strategy": p.strat, "qty": p.qty, "entry": round(p.entry_price, 2),
         "last": round(p.last_close, 2), "stop": round(p.stop, 2),
@@ -173,41 +193,51 @@ def write_report(cfg: Config, st: PaperState) -> tuple[str, str]:
         "stop": round(o.stop, 2), "target": round(o.target, 2) if o.target else "-",
         "qty": o.qty, "est_entry": round(o.est_entry, 2), "risk_inr": round(o.qty * (o.est_entry - o.stop)),
     } for o in res.pending])
+    items["orders"] = orders
 
     recent = res.trades.tail(10)[["symbol", "strategy", "entry_date", "exit_date", "qty",
                                   "entry_price", "exit_price", "reason", "net_pnl"]].copy() if len(res.trades) else pd.DataFrame()
     for c in ("entry_date", "exit_date"):
         if c in recent:
             recent[c] = pd.to_datetime(recent[c]).dt.date
+    sv = float(res.equity["value"].iloc[-1])
+    return f"""
+---
 
-    if len(res.equity) > 1:
-        m = summarize(res.equity, res.trades, bt.load_benchmark(cfg))
-        perf = "\n".join(f"- {k}: {v}" for k, v in m.items())
-    else:
-        perf = "_ledger just started: no performance yet_"
+# Swing sleeve (paper)
 
-    warn = "\n> **DATA MAY BE STALE** — latest bar is older than the last completed session. Run `trader update`.\n" if st.stale else ""
-    items: dict = {"orders": orders}
-    mom_md = _momentum_section(cfg, st.mom, day, items) if st.mom else ""
+- Sleeve started {st.start.date()} | Positions ₹{sv:,.0f} ({100 * sv / value:.0f}% of account) | {_sleeve_pnl(res.trades)}
+- Open positions: {len(res.positions)} | Orders for next session: {len(res.pending)} (sized on total account equity; filled from the shared cash after momentum's buys)
+
+## Swing orders for next session
+{_md_table(orders)}
+## Swing open positions
+{_md_table(pos)}
+## Swing recent closed trades
+{_md_table(recent)}"""
+
+
+def write_report(cfg: Config, st: PaperState) -> tuple[str, str]:
+    """Store the day's report (and order tables) in the database; returns `trader show` references."""
+    day = st.last_date.date()
+    items: dict = {}
+    warn = ("\n> **DATA MAY BE STALE** — latest bar is older than the last completed session. "
+            "Run `trader update`.\n" if st.stale else "")
+    evidence = _evidence_line(cfg) if st.result is not None else ""
+    swing_md = _swing_section(cfg, st, items) if st.result is not None else ""
+    mom_md = _momentum_section(cfg, st, items) if st.mom is not None else ""
     md = f"""# Paper trading report: {day}
 
-> **Paper only. Do not place real orders from this list.** {_evidence_line(cfg)}
+> **Paper only. Do not place real orders from this list.** {evidence}
 {warn}
 - Market regime (NIFTY 500): **{st.regime}**
-- Ledger start: {st.start.date()} | Equity: ₹{eq.iloc[-1]:,.0f} ({ret:+.2f}% vs ₹{st.capital:,.0f})
-- Open positions: {len(res.positions)} | Orders for next session: {len(res.pending)}
 
-## Orders for next session
-{_md_table(orders)}
-## Open positions
-{_md_table(pos)}
-## Recent closed trades
-{_md_table(recent)}
-## Performance since paper start
-{perf}
+{_account_section(st)}
+## Account performance since ledger start
+{_account_performance(st, cfg)}
 
 _Universe is today's NIFTY 500 (survivorship bias in backtests; the paper ledger itself is forward-only from its start date)._
-{mom_md}{_candidates_section(cfg, st)}"""
+{swing_md}{mom_md}{_candidates_section(cfg, st)}"""
     items["report"] = md
     outputs.save("daily", str(day), items, {"stale": st.stale})
-    return _ref(day), _ref(day, "orders")
+    return _ref(day), _ref(day, "orders" if st.result is not None else "momentum-orders")

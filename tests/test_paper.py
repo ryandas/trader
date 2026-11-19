@@ -129,13 +129,19 @@ def test_drop_swing_keeps_momentum(world):
 
 
 def test_swing_reset_does_not_touch_momentum(world):
+    """The momentum sleeve's frozen record is untouched by a swing reset. (Its fills now depend on the swing sleeve
+    through the shared cash, so only the record, not the replayed numbers, is expected to stay the same.)"""
     cfg, inst, idx = world
     paper.init(cfg, idx[300])
     paper.init_momentum(cfg, idx[300], MP, None)
-    before = paper.sync(cfg, inst, asof=str(idx[450].date())).mom.result.equity
+    con = paper._db(cfg)
+    before = paper._meta(con)["momentum"]
+    con.close()
     paper.init(cfg, idx[310], reset=True)  # restart swing only
-    after = paper.sync(cfg, inst, asof=str(idx[450].date())).mom.result.equity
-    pd.testing.assert_frame_equal(before, after)
+    con = paper._db(cfg)
+    assert paper._meta(con)["momentum"] == before
+    con.close()
+    assert paper.sync(cfg, inst, asof=str(idx[450].date())).mom is not None
 
 
 def test_sync_persists_momentum_sleeve(world):

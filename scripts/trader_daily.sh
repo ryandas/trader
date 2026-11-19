@@ -44,7 +44,7 @@ rc=1
       echo "✅ Run OK · log: $log"
     else
       echo "⚠️ message formatter failed; raw summary below"
-      grep -E '^(WARNING|momentum sleeve|swing sleeve|candidate |report: |orders: |[0-9]{4}-[0-9]{2}-[0-9]{2} \|)' "$log"
+      grep -E '^(WARNING|account \||momentum sleeve|swing sleeve|candidate |report: |orders: |[0-9]{4}-[0-9]{2}-[0-9]{2} \|)' "$log"
       echo "✅ Run OK · log: $log"
     fi
     # Ledger chart (PNG in charts/, path echoed to the message). A failure here never fails the run.

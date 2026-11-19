@@ -8,7 +8,9 @@ fmt = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(fmt)
 
 LOG = """2026-11-18 | regime bull
-momentum sleeve | value 5,100 (paid in 5,000) | 7 holdings | 1 sells, 2 buys queued
+account | equity 5,100 | cash 400 | paid in 5,000
+swing sleeve | positions 300 | 1 open | 1 orders for next session
+momentum sleeve | positions 4,400 | 7 holdings | 1 sells, 2 buys queued
 candidate my_cand (forward_only) | value 5,010 (paid in 5,000) | 3 holdings | 0 sells, 0 buys queued
 report: reports/2026-11-18.md
 orders: reports/2026-11-18-momentum_orders.csv
@@ -27,7 +29,9 @@ def _run(tmp_path, capsys):
 def test_formatter_uses_configured_top_n_and_escapes(tmp_path, capsys):
     out = _run(tmp_path, capsys)
     assert f"Holdings 7/{load_config().momentum.top_n}" in out
+    assert "Equity ₹5,100 · cash ₹400 · paid in ₹5,000" in out
     assert "P&L so far +₹100" in out
+    assert "Positions ₹4,400" in out and "positions 300" in out
     assert "AB\\_C, D\\*E" in out
     assert "my\\_cand" in out
     assert "momentum\\_orders" in out

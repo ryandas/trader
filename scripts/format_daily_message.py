@@ -26,11 +26,13 @@ def main(argv: list[str] | None = None) -> int:
     top_n = load_config().momentum.top_n
     argv = sys.argv if argv is None else argv
     log = Path(argv[1]).read_text(encoding="utf-8", errors="replace").splitlines()
-    date_line = regime = momentum = report = orders_csv = None
+    date_line = regime = momentum = report = orders_csv = account = None
     candidates, warnings, swing = [], [], None
     for line in log:
         if m := re.match(r"^(\d{4}-\d{2}-\d{2}) \| regime (\w+)$", line):
             date_line, regime = m.group(1), m.group(2)
+        elif line.startswith("account |"):
+            account = line
         elif line.startswith("momentum sleeve |"):
             momentum = line
         elif line.startswith("swing sleeve |"):
@@ -47,24 +49,32 @@ def main(argv: list[str] | None = None) -> int:
     out = [f"📈 *Trader paper run*" + (f" — data to {date_line}" if date_line else "")]
     out.append("🧭 Regime: " + (regime or "unknown"))
 
+    if account:
+        a = re.match(r"account \| equity ([\d,.-]+) \| cash ([\d,.-]+) \| paid in ([\d,.-]+)$", account)
+        out.append("")
+        out.append("🏦 *Account* (one shared cash account, paper)")
+        if a:
+            equity, cash, paid = a.groups()
+            out.append(f"• Equity {money(equity)} · cash {money(cash)} · paid in {money(paid)}")
+            try:
+                gain = float(equity.replace(",", "")) - float(paid.replace(",", ""))
+                out.append(f"• P&L so far {'+' if gain >= 0 else '−'}{money(f'{abs(gain):,.0f}')}")
+            except ValueError:
+                pass
+        else:
+            out.append(f"• {esc(account)}")
+
     if momentum:
         m = re.match(
-            r"momentum sleeve \| value ([\d,.-]+) \(paid in ([\d,.-]+)\) \| (\d+) holdings \| "
+            r"momentum sleeve \| positions ([\d,.-]+) \| (\d+) holdings \| "
             r"(\d+) sells, (\d+) buys queued",
             momentum,
         )
         out.append("")
         out.append("💼 *Momentum sleeve* (paper)")
         if m:
-            value, paid, holdings, sells, buys = m.groups()
-            gain = None
-            try:
-                gain = float(value.replace(",", "")) - float(paid.replace(",", ""))
-            except ValueError:
-                pass
-            out.append(f"• Value {money(value)} · paid in {money(paid)}")
-            if gain is not None:
-                out.append(f"• P&L so far {'+' if gain >= 0 else '−'}{money(f'{abs(gain):,.0f}')}")
+            value, holdings, sells, buys = m.groups()
+            out.append(f"• Positions {money(value)}")
             out.append(f"• Holdings {holdings}/{top_n}")
             if int(sells) or int(buys):
                 out.append(f"• Next session: 🔴 {sells} sells · 🟢 {buys} buys queued")

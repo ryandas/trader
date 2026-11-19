@@ -10,7 +10,7 @@ Paper trading only. Nothing in `src/` places orders, and `config.yaml` has `mode
   2. exits silently (empty stdout, nothing sent) if today's IST date is listed in `scripts/nse_holidays_2026.txt`;
   3. otherwise runs `uv run trader daily` with a 1500 s timeout, then stores the Telegram message and the full log in the `job_runs` table (a failure to log appends a warning but never changes the run's outcome).
 - Delivered to Telegram (stdout of the script):
-  - success: a header line, then the lines `trader daily` echoes (date and regime, momentum sleeve value / holdings / queued orders, any candidate sleeves, `report: trader show daily <date>` reference, a stale-data WARNING if any), then `OK (exit 0). Log: <path>`;
+  - success: a header line, then the lines `trader daily` echoes (date and regime, the shared account's equity / cash / paid in, each sleeve's positions value / holdings / queued orders, any candidate sleeves, `report: trader show daily <date>` reference, a stale-data WARNING if any), then `OK (exit 0). Log: <path>`;
   - failure: `FAILED ...` plus the last 40 lines of the log.
 - The script uses nothing from Dhan MCP. Candles come from yfinance. Needs `uv` on PATH (`~/.local/bin` is added) and network access.
 

@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .accounting import CashBox
 from .config import Config
 from .costs import apply_slippage, trade_costs
 from .data import store
@@ -174,79 +175,113 @@ def run(
 ) -> Result:
     """`strategies` maps key -> instance. `only` restricts trading to those keys.
     `emit_last` also queues orders from the final day's close (for paper/live trading)."""
-    dates, data, cands, mkt = prep.dates, prep.data, prep.cands, prep.mkt
-    selector = selector or Selector()
+    dates = prep.dates
     n = len(dates)
     i0 = int(dates.searchsorted(start)) if start is not None else 0
     i1 = int(dates.searchsorted(end, side="right")) if end is not None else n
-    cash = cfg.capital
-    positions: dict[str, Position] = {}
-    pending: list[Order] = []
-    trades: list[dict] = []
+    cash = CashBox(cfg.capital)
+    book = SwingBook(cfg, prep, strategies, cash, selector, only)
     eq_rows: list[tuple] = []
-    cc = cfg.costs
 
-    def close_pos(pos: Position, px: float, d: int, reason: str) -> None:
-        nonlocal cash
+    for d in range(i0, i1):
+        book.exits(d)  # 1 + 2
+        book.fills(d)  # 3
+        invested = book.end_of_day(d)  # 4
+        equity = cash.value + invested
+        eq_rows.append((dates[d], equity, invested / equity if equity > 0 else 0.0))
+        if d == i1 - 1 and not emit_last:
+            continue
+        book.decide(d, equity)  # 5
+
+    equity_df = pd.DataFrame(eq_rows, columns=["date", "equity", "invested"]).set_index("date")
+    return Result(pd.DataFrame(book.trades), equity_df, list(book.positions.values()), book.pending)
+
+
+class SwingBook:
+    """The swing sleeve's positions and queued orders, stepped a session at a time.
+
+    It draws on a `CashBox`: alone (`run`) it owns the box, in the paper ledger it shares the box with the momentum
+    sleeve (`ledger.py`). Per session: `exits` (open), `fills` (open), `end_of_day` (returns the positions' value), then
+    `decide` with the equity that risk and position caps are measured against (own equity alone, whole account shared)."""
+
+    def __init__(self, cfg: Config, prep: Prepared, strategies: dict[str, Strategy], cash: CashBox,
+                 selector: Selector | None = None, only: set[str] | None = None):
+        self.cfg, self.prep, self.strategies, self.cash = cfg, prep, strategies, cash
+        self.selector = selector or Selector()
+        self.only = only
+        self.positions: dict[str, Position] = {}
+        self.pending: list[Order] = []
+        self.trades: list[dict] = []
+
+    def close_pos(self, pos: Position, px: float, d: int, reason: str) -> None:
+        cc = self.cfg.costs
         fp = apply_slippage(px, "sell", cc.slippage_bps)
         value = fp * pos.qty
         cost = trade_costs("sell", value, cc)
-        cash += value - cost
+        self.cash.value += value - cost
         gross = (fp - pos.entry_price) * pos.qty
         costs = pos.entry_cost + cost
         net = gross - costs
         risk = pos.qty * (pos.entry_price - pos.init_stop)
-        trades.append({
+        self.trades.append({
             "symbol": pos.sym, "strategy": pos.strat, "params": pos.key, "mkt": pos.mkt,
             "entry_date": pos.entry_date,
-            "exit_date": dates[d], "qty": pos.qty, "entry_price": round(pos.entry_price, 2),
+            "exit_date": self.prep.dates[d], "qty": pos.qty, "entry_price": round(pos.entry_price, 2),
             "exit_price": round(fp, 2), "reason": reason, "bars_held": pos.bars_held,
             "risk": round(risk, 2), "gross_pnl": round(gross, 2), "costs": round(costs, 2), "net_pnl": round(net, 2),
             "r_multiple": round(net / risk, 3) if risk > 0 else 0.0,
         })
-        del positions[pos.sym]
+        del self.positions[pos.sym]
 
-    for d in range(i0, i1):
-        # 1 + 2: exits
-        for sym, pos in list(positions.items()):
+    def exits(self, d: int) -> None:
+        """Discretionary exits and stop/target exits at the open."""
+        data = self.prep.data
+        for sym, pos in list(self.positions.items()):
             sd = data[sym]
             o, h, l = sd.o[d], sd.h[d], sd.l[d]
             if math.isnan(o):
                 continue
             if pos.exit_pending:
-                close_pos(pos, o, d, pos.exit_pending)
+                self.close_pos(pos, o, d, pos.exit_pending)
                 continue
             r = check_exit(pos.stop, pos.target, o, h, l)
             if r:
-                close_pos(pos, r[0], d, r[1])
-        # 3: fills
-        for od in pending:
+                self.close_pos(pos, r[0], d, r[1])
+
+    def fills(self, d: int, min_fraction: float = 0.0) -> None:
+        """Fill the orders queued at the previous close. A buy is cut to the cash available; if the cut is below
+        `min_fraction` of the ordered quantity it is skipped (shared account only: a lone sleeve passes 0)."""
+        data, cc = self.prep.data, self.cfg.costs
+        for od in self.pending:
             sd = data[od.sym]
             o, h, l = sd.o[d], sd.h[d], sd.l[d]
-            if math.isnan(o) or od.sym in positions:
+            if math.isnan(o) or od.sym in self.positions:
                 continue
             p = fill_entry(od.entry_type, od.trigger, od.max_entry, o, h, l)
             if p is None or p <= od.stop:
                 continue
             fp = apply_slippage(p, "buy", cc.slippage_bps)
-            qty = min(od.qty, math.floor(cash / (fp * 1.01)))
-            if qty < 1:
+            qty = min(od.qty, math.floor(self.cash.value / (fp * 1.01)))
+            if qty < 1 or (min_fraction and qty < min_fraction * od.qty):
                 continue
             value = fp * qty
             cost = trade_costs("buy", value, cc)
-            cash -= value + cost
+            self.cash.value -= value + cost
             pos = Position(
-                od.sym, od.strat, od.key, od.mkt, sd.sector, qty, fp, dates[d], cost, od.stop, od.stop,
+                od.sym, od.strat, od.key, od.mkt, sd.sector, qty, fp, self.prep.dates[d], cost, od.stop, od.stop,
                 od.target, od.max_hold, last_close=p,
             )
-            positions[od.sym] = pos
+            self.positions[od.sym] = pos
             r = check_exit(pos.stop, pos.target, p, h, l)  # same-session stop/target
             if r:
-                close_pos(pos, r[0], d, r[1])
-        pending = []
-        # 4: end of day
+                self.close_pos(pos, r[0], d, r[1])
+        self.pending = []
+
+    def end_of_day(self, d: int) -> float:
+        """Trail/rule/time checks and mark to market; returns the positions' value at the close."""
+        data = self.prep.data
         invested = 0.0
-        for sym, pos in positions.items():
+        for sym, pos in self.positions.items():
             sd = data[sym]
             c = sd.c[d]
             if not math.isnan(c):
@@ -261,11 +296,13 @@ def run(
                 elif pos.max_hold and pos.bars_held >= pos.max_hold:
                     pos.exit_pending = "time"
             invested += pos.qty * pos.last_close
-        equity = cash + invested
-        eq_rows.append((dates[d], equity, invested / equity if equity > 0 else 0.0))
-        # 5: new orders
-        if d == i1 - 1 and not emit_last:
-            continue
+        return invested
+
+    def decide(self, d: int, equity: float) -> None:
+        """Queue orders for the next session from today's close. `equity` sizes risk and position caps."""
+        cfg, data, mkt = self.cfg, self.prep.data, self.prep.mkt
+        positions, pending, selector = self.positions, self.pending, self.selector
+        cash = self.cash.value
         heat = sum(max(p.last_close - p.stop, 0) * p.qty for p in positions.values())
         sector_n: dict[str, int] = {}
         for p in positions.values():
@@ -274,8 +311,8 @@ def run(
         regime = int(mkt[d])
         risk_pct = cfg.risk_per_trade * (cfg.regime.bear_size_mult if regime == BEAR else 1.0)
         day = [
-            c for c in cands.get(d, [])
-            if (only is None or c[1] in only) and selector.allowed(c[0], regime)
+            c for c in self.prep.cands.get(d, [])
+            if (self.only is None or c[1] in self.only) and selector.allowed(c[0], regime)
         ]
         day.sort(key=lambda c: (-selector.weight(c[0], regime), -c[3], c[2]))
         for sname, key, sym, _ in day:
@@ -283,7 +320,7 @@ def run(
                 continue
             if len(positions) + len(pending) >= cfg.risk.max_positions:
                 break
-            st, sd = strategies[key], data[sym]
+            st, sd = self.strategies[key], data[sym]
             a = sd.sig[key]
             stop = a["stop"][d]
             est = a["trigger"][d] if st.entry_type == "stop" else sd.c[d]
@@ -313,9 +350,6 @@ def run(
             sector_n[sd.sector] = sector_n.get(sd.sector, 0) + 1
             heat += qty * (est - stop)
             committed += qty * est
-
-    equity_df = pd.DataFrame(eq_rows, columns=["date", "equity", "invested"]).set_index("date")
-    return Result(pd.DataFrame(trades), equity_df, list(positions.values()), pending)
 
 
 def load_benchmark(cfg: Config) -> pd.Series | None:

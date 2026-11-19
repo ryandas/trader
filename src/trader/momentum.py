@@ -17,6 +17,7 @@ import pandas as pd
 
 from . import sessions
 from . import walkforward as wf
+from .accounting import CashBox, Nav
 from .config import Config
 from .costs import apply_slippage, trade_costs
 from .data import store
@@ -137,6 +138,15 @@ def truncate(prep: MomPrep, t: int) -> MomPrep:
     )
 
 
+def month_end_mask(dates: pd.DatetimeIndex) -> np.ndarray:
+    """True on the last trading day of each month (final bar: is the next NSE session, holidays skipped, in a new month?)."""
+    month = dates.to_period("M")
+    m = np.zeros(len(dates), dtype=bool)
+    m[:-1] = month[:-1] != month[1:]
+    m[-1] = sessions.next_session(dates[-1]).to_period("M") != month[-1]
+    return m
+
+
 def prepare(cfg: Config, instruments: pd.DataFrame, liquid_top: int | None = None, pit: bool = False) -> MomPrep:
     """`liquid_top` keeps only the N most liquid names (by 20-day median traded value) on each day,
     a partial guard against survivorship bias: large caps were mostly large before they were indexed.
@@ -167,10 +177,8 @@ def prepare(cfg: Config, instruments: pd.DataFrame, liquid_top: int | None = Non
     above200 = close > close.rolling(200, min_periods=200).mean()
     mkt = market_regime(bench["close"]).reindex(dates).ffill().fillna(NEUTRAL).astype(int).to_numpy()
     month = dates.to_period("M")
-    rebal = np.zeros(len(dates), dtype=bool)
-    rebal[:-1] = month[:-1] != month[1:]
-    nxt = sessions.next_session(dates[-1])  # last bar: is the next NSE session (holidays skipped) in a new month?
-    rebal[-1] = nxt.to_period("M") != month[-1]
+    rebal = month_end_mask(dates)
+    nxt = sessions.next_session(dates[-1])
     week = dates.to_period("W")
     rebal_w = np.zeros(len(dates), dtype=bool)
     rebal_w[:-1] = week[:-1] != week[1:]
@@ -189,6 +197,100 @@ def prepare(cfg: Config, instruments: pd.DataFrame, liquid_top: int | None = Non
         bench_close=bench["close"].reindex(dates).ffill().to_numpy(),
         sectors=(instruments.set_index("symbol")["sector"].reindex(syms).fillna("Unknown").tolist() if "sector" in instruments else None),
     )
+
+
+class MomBook:
+    """One momentum sleeve's positions and queued orders, stepped a session at a time.
+
+    The book draws on a `CashBox`. Alone (`run`) it owns the box; in the paper ledger the same box is shared with the
+    swing sleeve (`ledger.py`). Per session the caller runs `sell_at_open`, `buy_at_open`, then marks and calls `decide`
+    with the equity the targets should be a share of (this sleeve's own value alone, or the whole account's)."""
+
+    def __init__(self, cfg: Config, prep: MomPrep, p: MomParams, cash: CashBox):
+        self.cfg, self.prep, self.p, self.cash = cfg, prep, p, cash
+        self.rebal = prep.rebal_mask(p.rebalance)
+        if p.random_seed is None and p.ranker != "momentum":
+            self.score = prep.ranker_score(p)
+        elif p.random_seed is None:
+            self.score = prep.score(p.lookback, p.skip)
+        else:  # control: same rules, costs and universe, but a persistent random pick (no momentum info)
+            rnd = np.random.default_rng(p.random_seed).random(prep.c.shape[1])
+            self.score = np.broadcast_to(rnd, prep.c.shape)
+        self.pos: dict[int, dict] = {}  # symbol index -> position
+        self.sells: dict[int, str] = {}  # symbol index -> reason, executed at next open
+        self.buys: list[tuple[int, float]] = []  # (symbol index, target value)
+        self.trades: list[dict] = []
+        self.traded_value = 0.0
+
+    def sell_at_open(self, d: int) -> None:
+        prep, o, cc = self.prep, self.prep.o, self.cfg.costs
+        for si in list(self.sells):
+            if si not in self.pos or math.isnan(o[d, si]):
+                continue  # no bar today (suspended): try again next session
+            q = self.pos.pop(si)
+            fp = apply_slippage(o[d, si], "sell", cc.slippage_bps)
+            val = fp * q["qty"]
+            cost = trade_costs("sell", val, cc)
+            self.cash.value += val - cost
+            self.traded_value += val
+            gross = (fp - q["px"]) * q["qty"]
+            net = gross - q["cost"] - cost
+            self.trades.append({
+                "symbol": prep.syms[si], "entry_date": prep.dates[q["d"]], "exit_date": prep.dates[d],
+                "qty": q["qty"], "entry_price": round(q["px"], 2), "exit_price": round(fp, 2),
+                "reason": self.sells[si], "bars_held": d - q["d"], "gross_pnl": round(gross, 2),
+                "costs": round(q["cost"] + cost, 2), "net_pnl": round(net, 2),
+                "ret_pct": round(100 * net / (q["px"] * q["qty"]), 2),
+            })
+            del self.sells[si]
+
+    def buy_at_open(self, d: int, min_fraction: float = 0.0) -> None:
+        """Fill the queued buys. A buy is cut to the cash available; if the cut is below `min_fraction` of the intended
+        quantity it is skipped (shared account only; a lone sleeve passes 0 and is never cash-limited in practice)."""
+        o, cc = self.prep.o, self.cfg.costs
+        for si, tv in self.buys:
+            if si in self.pos or math.isnan(o[d, si]):
+                continue
+            fp = apply_slippage(o[d, si], "buy", cc.slippage_bps)
+            qty = math.floor(min(tv, self.cash.value) / (fp * 1.004))  # headroom for charges
+            if qty < 1 or (min_fraction and qty < min_fraction * math.floor(tv / (fp * 1.004))):
+                continue
+            val = fp * qty
+            cost = trade_costs("buy", val, cc)
+            self.cash.value -= val + cost
+            self.traded_value += val
+            self.pos[si] = {"qty": qty, "px": fp, "cost": cost, "d": d}
+        self.buys = []
+
+    def invested(self, d: int) -> float:
+        return sum(q["qty"] * self.prep.c[d, si] for si, q in self.pos.items())
+
+    def decide(self, d: int, equity: float, force_rebalance: bool = False) -> None:
+        """Queue orders for the next open from today's close. `equity` is what each target is a share of."""
+        prep, p = self.prep, self.p
+        bear = prep.mkt[d] == BEAR
+        reb_d = bool(self.rebal[d]) or force_rebalance
+        if bear and (p.bear_exit or reb_d):
+            self.sells.update({si: "bear" for si in self.pos})
+            return
+        if not reb_d:
+            return
+        elig = prep.liquid[d] & prep.above200[d] & np.isfinite(self.score[d])
+        idx = np.nonzero(elig)[0]
+        ranked = idx[np.argsort(-self.score[d, idx], kind="stable")]
+        rank = {int(si): r for r, si in enumerate(ranked)}
+        keep = {si for si in self.pos if rank.get(si, 10**9) < p.top_n + p.buffer}
+        for si in self.pos:
+            if si not in keep:
+                self.sells[si] = "rebalance"
+        free = p.top_n - len(keep)
+        target = equity / p.top_n
+        for si in ranked:
+            if free <= 0:
+                break
+            if int(si) not in keep:
+                self.buys.append((int(si), target))
+                free -= 1
 
 
 def run(
@@ -210,110 +312,33 @@ def run(
     open. The result's `equity` column is then a deposit-adjusted (time-weighted) curve starting at `cfg.capital`, so
     returns, drawdown and Sharpe never count a deposit as profit; `value` is the real money and `deposited` the running
     total paid in. With contribution 0 all three are identical to the old single `equity` curve."""
-    dates, o, c = prep.dates, prep.o, prep.c
+    dates = prep.dates
     n = len(dates)
     i0 = int(dates.searchsorted(start)) if start is not None else 0
     i1 = int(dates.searchsorted(end, side="right")) if end is not None else n
-    rebal = prep.rebal_mask(p.rebalance)
-    rebal_m = prep.rebal  # deposit days: last session of each month
-    if p.random_seed is None and p.ranker != "momentum":
-        score = prep.ranker_score(p)
-    elif p.random_seed is None:
-        score = prep.score(p.lookback, p.skip)
-    else:  # control: same rules, costs and universe, but a persistent random pick (no momentum info)
-        rnd = np.random.default_rng(p.random_seed).random(prep.c.shape[1])
-        score = np.broadcast_to(rnd, prep.c.shape)
-    cc = cfg.costs
-    cash = cfg.capital
-    pos: dict[int, dict] = {}  # symbol index -> position
-    sells: dict[int, str] = {}  # symbol index -> reason, executed at next open
-    buys: list[tuple[int, float]] = []  # (symbol index, target value)
-    trades: list[dict] = []
+    cash = CashBox(cfg.capital)
+    book = MomBook(cfg, prep, p, cash)
+    navs = Nav(cfg.capital, contribution)
     eq_rows: list[tuple] = []
-    traded_value = 0.0
-    nav, prev_value, deposited = cfg.capital, cfg.capital, cfg.capital
 
     for d in range(i0, i1):
         # 1. execute orders queued at the previous close: sells first, then buys
-        for si in list(sells):
-            if si not in pos or math.isnan(o[d, si]):
-                continue  # no bar today (suspended): try again next session
-            q = pos.pop(si)
-            fp = apply_slippage(o[d, si], "sell", cc.slippage_bps)
-            val = fp * q["qty"]
-            cost = trade_costs("sell", val, cc)
-            cash += val - cost
-            traded_value += val
-            gross = (fp - q["px"]) * q["qty"]
-            net = gross - q["cost"] - cost
-            trades.append({
-                "symbol": prep.syms[si], "entry_date": dates[q["d"]], "exit_date": dates[d],
-                "qty": q["qty"], "entry_price": round(q["px"], 2), "exit_price": round(fp, 2),
-                "reason": sells[si], "bars_held": d - q["d"], "gross_pnl": round(gross, 2),
-                "costs": round(q["cost"] + cost, 2), "net_pnl": round(net, 2),
-                "ret_pct": round(100 * net / (q["px"] * q["qty"]), 2),
-            })
-            del sells[si]
-        for si, tv in buys:
-            if si in pos or math.isnan(o[d, si]):
-                continue
-            fp = apply_slippage(o[d, si], "buy", cc.slippage_bps)
-            qty = math.floor(min(tv, cash) / (fp * 1.004))  # headroom for charges
-            if qty < 1:
-                continue
-            val = fp * qty
-            cost = trade_costs("buy", val, cc)
-            cash -= val + cost
-            traded_value += val
-            pos[si] = {"qty": qty, "px": fp, "cost": cost, "d": d}
-        buys = []
-
-        # 2. mark to market
-        invested = sum(q["qty"] * c[d, si] for si, q in pos.items())
-        pre = cash + invested  # value before today's deposit
-        if contribution:
-            nav *= pre / prev_value if prev_value > 0 else 1.0  # time-weighted: a deposit is not a return
-            if rebal_m[d]:
-                cash += contribution
-                deposited += contribution
-        else:
-            nav = pre
-        equity = cash + invested  # real money, deposit included
-        prev_value = equity
+        book.sell_at_open(d)
+        book.buy_at_open(d)
+        # 2. mark to market (and deposit on the last session of each month: `prep.rebal`)
+        invested = book.invested(d)
+        nav, equity, deposited = navs.mark(cash, invested, bool(prep.rebal[d]))
         eq_rows.append((dates[d], nav, invested / equity if equity > 0 else 0.0, equity, deposited))
-
         # 3. decide for the next open
         if d == i1 - 1 and not emit_last:
             continue
-        bear = prep.mkt[d] == BEAR
-        reb_d = bool(rebal[d]) or (warm_start and d == i0)
-        if bear and (p.bear_exit or reb_d):
-            sells.update({si: "bear" for si in pos})
-            continue
-        if not reb_d:
-            continue
-        elig = prep.liquid[d] & prep.above200[d] & np.isfinite(score[d])
-        idx = np.nonzero(elig)[0]
-        ranked = idx[np.argsort(-score[d, idx], kind="stable")]
-        rank = {int(si): r for r, si in enumerate(ranked)}
-        keep = {si for si in pos if rank.get(si, 10**9) < p.top_n + p.buffer}
-        for si in pos:
-            if si not in keep:
-                sells[si] = "rebalance"
-        free = p.top_n - len(keep)
-        target = equity / p.top_n
-        for si in ranked:
-            if free <= 0:
-                break
-            if int(si) not in keep:
-                buys.append((int(si), target))
-                free -= 1
+        book.decide(d, equity, force_rebalance=warm_start and d == i0)
 
     equity_df = pd.DataFrame(eq_rows, columns=["date", "equity", "invested", "value", "deposited"]).set_index("date")
     years = max((equity_df.index[-1] - equity_df.index[0]).days / 365.25, 1e-9) if len(equity_df) else 1
     avg_eq = equity_df["value"].mean() if len(equity_df) else 1.0
     return MomResult(
-        pd.DataFrame(trades), equity_df, pos, sells, buys, traded_value / avg_eq / years
+        pd.DataFrame(book.trades), equity_df, book.pos, book.sells, book.buys, book.traded_value / avg_eq / years
     )
 
 
