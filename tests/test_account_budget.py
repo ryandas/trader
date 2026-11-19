@@ -54,7 +54,7 @@ def _qty(book, sym):
 #   swing S5: order int(50,000 // 190.739) = 262; budget limit floor(30,000/190.834) = 157 (157 >= 131) -> 157 shares.
 #   candidate S6: divisor 264.923; floor(30,000/264.923) = 113 (intended 188; 113 >= 94) -> 113 shares.
 #   Spend ~ 29,849 + 29,961 + 29,816 + ~105 charges = ~89,730, so cash (30,000 left before the candidate) never binds.
-def test_a_three_sleeves_each_stay_within_a_third_of_equity_at_the_open(acct):
+def test_three_sleeves_each_capped_at_a_third_of_equity(acct):
     box, m, s, (c,) = _open(acct, 90_000.0, momq=("S3", 50_000.0), swingq=("S5", 50_000.0), candq=[("S6", 50_000.0)])
     swing, mbook, (c0,), mprep, sprep, cfg = _open.books
     assert _qty(mbook, "S3") == 98
@@ -65,7 +65,7 @@ def test_a_three_sleeves_each_stay_within_a_third_of_equity_at_the_open(acct):
     assert box.value == pytest.approx(90_000.0 - spent)
 
 
-def test_b_momentum_alone_has_the_whole_account_as_budget(acct):
+def test_momentum_alone_budget_is_the_whole_account(acct):
     # holds a position, cash 4,000: the buy is limited by cash only, never by a share of equity
     cfg, idx, sprep, mprep, box, swing, mbook = _books(acct, 4_000.0)
     held = mprep.syms.index("S1")
@@ -84,7 +84,7 @@ def test_b_momentum_alone_has_the_whole_account_as_budget(acct):
 #   swing S5: order int(9,000 // 190.739) = 47; min(47, floor(5,121/192.742) = 26, floor(5,000/190.834) = 26) = 26 (26 >= 23.5)
 #     -> 26 shares (4,961.69 + ~5.8). Momentum is capped at its half although it asked for 9,000 and cash allowed it; if the
 #     budget were a third (3,333) momentum would get 10 shares (< 14.5) and be skipped.
-def test_c_two_sleeves_get_half_each(acct):
+def test_two_sleeves_get_half_each(acct):
     box, m, s, _ = _open(acct, 10_000.0, momq=("S3", 9_000.0), swingq=("S5", 9_000.0))
     swing, mbook, _c, mprep, sprep, cfg = _open.books
     assert _qty(mbook, "S3") == 16
@@ -114,7 +114,7 @@ def test_existing_holdings_count_towards_the_budget(acct):
     assert mbook.value_at_open(D) <= equity / 2 * TOL
 
 
-def test_d_momentum_target_is_budget_over_top_n(acct):
+def test_momentum_target_is_budget_over_top_n(acct):
     cfg, _, idx, sprep, strats, mprep = acct
     spec = ledger.AccountSpec(start=idx[300], capital=cfg.capital, contribution=cfg.monthly_contribution)
 
@@ -133,7 +133,7 @@ def test_d_momentum_target_is_budget_over_top_n(acct):
     pytest.fail("no month-end with queued momentum buys")
 
 
-def test_e_cash_never_negative_with_three_sleeves(acct):
+def test_cash_never_negative_with_three_sleeves(acct):
     cfg, _, idx, sprep, strats, mprep = acct
     spec = ledger.AccountSpec(start=idx[300], capital=cfg.capital, contribution=cfg.monthly_contribution)
     r = ledger.run(cfg, spec, swing=ledger.SwingSpec(sprep, strats, Selector(), idx[300]),
