@@ -18,7 +18,7 @@ Never present any signal as a recommendation to trade real money.
 
 ```
 uv sync                                  # install
-uv run pytest -q                         # tests (164; DB tests run in a throwaway schema on the Postgres server, ~4 min)
+uv run pytest -q                         # tests (see `uv run pytest -q` for the current count; DB tests run in a throwaway schema on the Postgres server)
 uv run pytest tests/test_fills_risk_costs.py::test_gap_through_stop_exits_at_open   # one test
 uv run trader init                       # build NIFTY 500 -> Dhan securityId list (instruments table)
 uv run trader update [SYMBOLS...]        # backfill/refresh daily candles (10y); no args also refreshes the NIFTY500 benchmark
