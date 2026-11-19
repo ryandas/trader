@@ -110,17 +110,31 @@ def test_sells_of_every_sleeve_come_before_any_buy(acct):
     assert held not in cbook.pos and want in mbook.pos
 
 
+def test_cap_does_not_limit_momentum_but_cuts_swing_and_candidates(acct):
+    # equity 100,000, cap 40% = 40,000. Momentum's 50,000 target is NOT capped; swing and a candidate asking 50,000 are.
+    box, _, mbook, _, mprep, _ = _open(acct, 100_000.0, 0.4, momq=("S3", 50_000.0))
+    q = mbook.pos[mprep.syms.index("S3")]
+    assert q["qty"] == int(50_000.0 // (q["px"] * 1.004))  # full target, not cut to 40,000
+    assert q["qty"] * q["px"] > 0.4 * 100_000.0
+    _, swing, _, _, _, sprep = _open(acct, 100_000.0, 0.4, swingq=("S5", 50_000.0))
+    sw = sum(p.qty * sprep.data[s].o[400] for s, p in swing.positions.items())
+    assert 0 < sw <= 0.4 * 100_000.0 * 1.0001
+    _, _, _, (c0,), mprep, _ = _open(acct, 100_000.0, 0.4, candq=[("S6", 50_000.0)])
+    cv = sum(q["qty"] * mprep.o[400, si] for si, q in c0.pos.items())
+    assert 0 < cv <= 0.4 * 100_000.0 * 1.0001
+
+
 def test_sleeve_cap_cuts_a_buy_and_skips_it_below_min_size(acct):
     # 40% of equity 10,000 = 4,000: a 6,000 target is cut to the cap (67% of intended) and taken
-    box, _, mbook, _, mprep, _ = _open(acct, 10_000.0, 0.4, momq=("S3", 6_000.0))
-    q = mbook.pos[mprep.syms.index("S3")]
+    box, _, _, (c0,), mprep, _ = _open(acct, 10_000.0, 0.4, candq=[("S3", 6_000.0)])
+    q = c0.pos[mprep.syms.index("S3")]
     assert 0.3 * 10_000.0 < q["qty"] * q["px"] <= 0.4 * 10_000.0  # cut TO the cap, not skipped
     # a 2% cap leaves room for under half the intended quantity: skipped, like a cash-short buy
-    box, _, mbook, _, mprep, _ = _open(acct, 10_000.0, 0.02, momq=("S3", 6_000.0))
-    assert not mbook.pos and box.value == 10_000.0
+    box, _, _, (c0,), mprep, _ = _open(acct, 10_000.0, 0.02, candq=[("S3", 6_000.0)])
+    assert not c0.pos and box.value == 10_000.0
 
 
-def test_cap_applies_to_every_sleeve_and_counts_what_the_sleeve_already_holds(acct):
+def test_cap_applies_to_swing_and_candidates_and_counts_what_the_sleeve_already_holds(acct):
     cfg, idx, sprep, mprep, box, swing, mbook = _books(acct, 10_000.0)
     cbook = mom.MomBook(cfg, mprep, CP, box)
     d = 400
@@ -142,7 +156,9 @@ def test_cap_is_a_config_value_not_a_constant(acct):
     assert Config().account.max_sleeve_share == 0.40
     assert yaml.safe_load((ROOT / "config.yaml").read_text())["account"]["max_sleeve_share"] == 0.40
     tight, loose = _run(acct, share=0.15), _run(acct, share=1.0)
-    assert tight.equity["mom_value"].max() < loose.equity["mom_value"].max()
+    # momentum is exempt: a tight cap does not shrink it; the capped swing sleeve never gets bigger
+    assert tight.equity["mom_value"].max() >= 0.9 * loose.equity["mom_value"].max()
+    assert tight.equity["swing_value"].max() <= loose.equity["swing_value"].max()
 
 
 # ---------------------------------------------------------------- persisted ledger: the record's capital is ignored
@@ -172,5 +188,6 @@ def test_candidate_record_capital_does_not_change_account_equity_or_deposits(lab
     e = out[5_000.0]
     assert e["value"].iloc[0] == pytest.approx(50_000)  # no extra 5,000 (or 7.5m) at the candidate's start
     assert e["deposited"].diff().fillna(0.0).isin([0.0, 5_000.0]).all()  # only the account's own deposit
-    assert (e["cand_value"] > 0).any() and (e["cash"] >= -1e-6).all()
+    # momentum is exempt from the cap and buys first, so the candidate may get no cash at all (open question 1)
+    assert (e["cand_value"] >= 0).all() and (e["cash"] >= -1e-6).all()
     np.testing.assert_allclose(e["cash"] + e["swing_value"] + e["mom_value"] + e["cand_value"], e["value"], atol=1e-6)

@@ -42,7 +42,8 @@ ARBITRATION = (
     "All sleeves draw on this one cash balance. On a shared session all sells/exits run first, then buys in the order "
     "momentum, swing, promoted research candidates (promotion order); a buy is cut to the cash left and to the sleeve "
     "cap, and skipped if that is under half its intended size. Targets and risk are measured against total account "
-    "equity. PROVISIONAL: no sleeve's positions may exceed {share:.0%} of account equity (config account.max_sleeve_share)."
+    "equity. PROVISIONAL: swing and each candidate sleeve may not exceed {share:.0%} of account equity (config "
+    "account.max_sleeve_share); momentum is exempt."
 )
 
 

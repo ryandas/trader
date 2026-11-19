@@ -62,9 +62,13 @@ class MomentumCfg(BaseModel):
 
 
 class AccountCfg(BaseModel):
-    """Shared paper account (ledger.py). PROVISIONAL, owner to review."""
+    """Shared paper account (ledger.py). PROVISIONAL, owner to review.
 
-    max_sleeve_share: float = 0.40  # a sleeve's positions may not exceed this share of account equity (1.0 = no cap)
+    `max_sleeve_share` caps the swing sleeve and each promoted research candidate sleeve. The momentum sleeve is
+    exempt (owner decision 2026-11-19): it keeps its full share of account equity.
+    """
+
+    max_sleeve_share: float = 0.40  # swing/candidate sleeve cap as a share of account equity (1.0 = no cap); momentum exempt
 
 
 class Config(BaseModel):

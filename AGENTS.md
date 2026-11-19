@@ -18,7 +18,7 @@ Never present any signal as a recommendation to trade real money.
 
 ```
 uv sync                                  # install
-uv run pytest -q                         # tests (149; DB tests run in a throwaway schema on the Postgres server, ~4 min)
+uv run pytest -q                         # tests (160; DB tests run in a throwaway schema on the Postgres server, ~4 min)
 uv run pytest tests/test_fills_risk_costs.py::test_gap_through_stop_exits_at_open   # one test
 uv run trader init                       # build NIFTY 500 -> Dhan securityId list (instruments table)
 uv run trader update [SYMBOLS...]        # backfill/refresh daily candles (10y); no args also refreshes the NIFTY500 benchmark
@@ -71,14 +71,13 @@ The paper ledger is one cash account, replayed from the earliest sleeve start by
 `trader research-promote SLUG` folds a candidate into the shared account (`ledger.CandSpec`, replayed by the same `ledger.run`):
 - **No new money**: its opening positions are bought from account cash at its start date; it has no `capital` and adds no deposit (the account's single month-end deposit is the only one). The `capital` stored in its promotion record (e.g. quality_india's 5,000) is the research harness's and is ignored (test: `test_candidate_record_capital_does_not_change_account_equity_or_deposits`). Its value counts toward account equity: account = cash + swing + momentum + candidates (`account_equity.cand_value`). Targets are equity/top_n of TOTAL account equity.
 - **Arbitration**: sells and exits of every sleeve first; then buys in the order momentum, swing, candidates (in promotion order, by the `promoted` stamp); each cut to the cash left and skipped below `min_size_fraction`.
-- **Sleeve cap**: `account: {max_sleeve_share: 0.40}` in `config.yaml` (`AccountCfg`). A sleeve's positions (momentum, swing, each candidate) may not exceed that share of account equity at the open; a buy is cut so the sleeve stays within it (existing holdings count) and skipped below `min_size_fraction`. 1.0 disables it. **It binds momentum too** (10 holdings at 1/10 of equity is ~100%): with 0.40, momentum buys fill until it holds ~40% of the account and the rest is cut or skipped. Check this before the first month-end rebalance (fills 2026-12-01).
+- **Sleeve cap**: `account: {max_sleeve_share: 0.40}` in `config.yaml` (`AccountCfg`). The swing sleeve's and each candidate's positions may not exceed that share of account equity at the open; a buy is cut so the sleeve stays within it (existing holdings count) and skipped below `min_size_fraction`. 1.0 disables it. **Momentum is exempt** (owner decision 2026-11-19): it keeps its full share of account equity (~1/top_n per name), as in its backtest. The cap itself stays PROVISIONAL.
 - A candidate not yet started, with a changed file (code freeze) or a missing file is not replayed and listed under "NOT replayed" in the report; this changes the account's history retroactively.
 
 Open questions for the owner:
-1. Should the cap differ per sleeve (e.g. higher for momentum, the core sleeve, lower for candidates), and should it bind momentum at all?
-2. Should candidates get a reserved share of cash instead of arbitrating last (today they only get what momentum and swing leave, which is little: momentum targets ~100%)?
-3. Should promotion take effect at the next session (as now: start = last bar, first orders fill at the next open) or at a later fixed date, e.g. the next month-end deposit?
-4. `research-retire` drops the sleeve from the replay entirely, rewriting account history as if it had never held anything. It should liquidate at the retire date instead. Same for a code-freeze failure.
+1. Should candidates get a reserved share of cash instead of arbitrating last (today they only get what momentum and swing leave, which is little: momentum targets ~100%)?
+2. Should promotion take effect at the next session (as now: start = last bar, first orders fill at the next open) or at a later fixed date, e.g. the next month-end deposit?
+3. `research-retire` drops the sleeve from the replay entirely, rewriting account history as if it had never held anything. It should liquidate at the retire date instead. Same for a code-freeze failure.
 
 ### Detailed findings and research loop (moved 2026-11-18)
 

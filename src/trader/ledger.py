@@ -19,10 +19,10 @@ Design (owner decision, 2026-11-19): the ledger is a single cash account, not on
   research harness's and is never read here. Its targets are a 1/top_n share of TOTAL account equity, like momentum's.
   Candidates buy last, after momentum and swing, in promotion order. Research itself (`research-eval`, the trial
   registry) stays unfolded and does not touch the account.
-- SLEEVE CAP (provisional): a sleeve's positions (momentum, swing, each candidate) may not exceed
+- SLEEVE CAP (provisional): a sleeve's positions (swing and each candidate; NOT momentum, which is exempt and keeps
+  its full share of account equity as in its backtest) may not exceed
   `account.max_sleeve_share` (config.yaml, default 0.40) of account equity at the open. A buy is cut so the sleeve stays
   within the cap (what it already holds counts) and skipped below `min_size_fraction` of its intended size. 1.0 = no cap.
-  Note momentum alone targets ~100% of equity, so the cap binds it too.
   Orders are queued from the previous close without reserving cash against each other; arbitration happens only when
   they fill, so the result does not depend on which sleeve is listed first in the code path that queues them.
 - Like every sleeve, the account is a deterministic replay from its start date with frozen parameters (`paper.py`).
@@ -93,7 +93,7 @@ class AccountResult:
 def open_session(d: int, swing: bt.SwingBook | None, mbook: mm.MomBook | None, min_fraction: float,
                  cands: Sequence[mm.MomBook] = (), max_share: float = 1.0) -> None:
     """The cash arbitration rule: all sells and exits (every sleeve) first, then buys in the order momentum, swing,
-    candidates (promotion order). Each buy is cut to the cash left and to the sleeve cap (`max_share` of account equity
+    candidates (promotion order). Each buy is cut to the cash left and (swing and candidates only, not momentum) to the sleeve cap (`max_share` of account equity
     at the open, counting what the sleeve already holds) and skipped below `min_fraction` of its intended size."""
     if swing is not None:
         swing.exits(d)
@@ -108,7 +108,7 @@ def open_session(d: int, swing: bt.SwingBook | None, mbook: mm.MomBook | None, m
         return math.inf if max_share >= 1.0 else max(max_share * equity - b.value_at_open(d), 0.0)
 
     if mbook is not None:
-        mbook.buy_at_open(d, min_fraction, room(mbook))
+        mbook.buy_at_open(d, min_fraction, math.inf)  # momentum is exempt from the sleeve cap (owner decision)
     if swing is not None:
         swing.fills(d, min_fraction, room(swing))
     for c in cands:

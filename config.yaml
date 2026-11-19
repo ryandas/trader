@@ -34,7 +34,7 @@ costs:                      # delivery equity; see CostCfg for statutory default
   slippage_bps: 5
 
 account:                    # shared paper account (PROVISIONAL, see AGENTS.md "Shared account")
-  max_sleeve_share: 0.40    # a sleeve's positions (momentum, swing, each candidate) may not exceed this share of account equity
+  max_sleeve_share: 0.40    # swing and each candidate sleeve may not exceed this share of account equity; momentum is exempt
 
 research:                   # fixed gates for harness v4 (review if capital/contribution changes)
   dsr_min: 0.95
