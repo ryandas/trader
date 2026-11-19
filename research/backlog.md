@@ -18,15 +18,19 @@ AQR, arXiv q-fin, NSE/BSE methodologies, Indian journals), at most 5 new rows pe
 
 | slug | idea | mechanism | source |
 |---|---|---|---|
-| low_vol | Low-volatility ranking: lowest trailing realised daily volatility (top 10, quarterly, buffer 5; grid fixed: window 126 or 252). | Investors overpay for volatile/lottery-like stocks and leverage-constrained investors tilt to high beta, so low-risk names earn higher risk-adjusted returns. | NSE low-risk anomaly study Jan 2001-Jun 2016 (abstract seen via search 2026-11-19); Agarwalla et al. 2014 BAB India (seen cited). Journal articles; effect size sample-dependent. |
-| high_52w | Nearness to 52-week high: close / trailing 252-bar max (top 10, buffer 5; grid fixed: rebalance M or Q). | Anchoring: investors under-react to news near the 52-week high, so near-high stocks keep outperforming. | George and Hwang (2004), Journal of Finance 59(4) (US; abstract seen via search 2026-11-19; no India ranking study found). Published effect may have weakened. Journal article. |
-| ew_winners_top20 | Equal-weight factor winners: rank the liquid universe by 12-1 momentum (same score as the momentum sleeve), hold the top 20 equal-weighted, monthly rebalance, buffer 10; grid fixed now: top_n 20 or 30. Deviates from the usual ~10 names: the source uses 20-name portfolios, and 10 names is too concentrated to test the weighting idea. Expect high correlation with default momentum (it is the same score with different weights); the not_a_duplicate gate may fail. | Equal weighting avoids the large-cap tilt of cap weights; with monthly rebalancing equal weighting beats value weighting on mean return and alpha (Plyakha et al. 2014, cited in the source). | Raju & Teli, 'Long Factors, not Short Change: Long Only Factor Portfolios in India', SSRN 4000418 (Jan 2022; abstract and intro opened 2026-11-19): monthly rebalanced, equal-weighted, long-only winner portfolios from the top 200 Indian stocks, 20 names per decile; alpha survives costs. Working paper (Invespar and QED Capital, practitioner-authored). Full text not read. |
+| quality_india | (forward-only fundamentals; check which fields the snapshot holds before writing) Long-only quality (profitability / low leverage) top ~10 names, quarterly. Price/volume queue is EMPTY: no backtestable idea queued. | Profitable, stable firms are mispriced relative to their quality; long-only version is lower churn and lower risk. Published effects often weaken after publication. | SSRN 4284686, quality factor in India (abstract seen in search 2026-11-19: QMJ 4-factor alpha 0.92%/month, long-only 0.69%/month); full text not opened. Working paper. |
 
 ## Done
 
 | slug | date | verdict | note |
 |---|---|---|---|
 | regime_switch | 2026-11-19 | FAIL | beats_index_and_basket: 13.3% vs index 12.74% vs basket 16.1%; other gates passed (DSR 0.976, 1 trial). Not a cost effect. |
+| low_vol | 2026-11-19 | FAIL | beats_index_and_basket: 1.52% vs index 12.74% vs basket 16.1%; DSR 0.642 (2 trials). Not a cost effect (charges 0.35%/yr); exposure only 25-35% (bear exit / regime filter). |
+| high_52w | 2026-11-19 | FAIL | beats_index_and_basket: 11.21% vs index 12.74% vs basket 16.1%; DSR 0.884 (3 trials). Partly cost: 2.22%/yr charges at 5,000; 14.6% at 25,000. Correlation with momentum 0.72. |
+| sector_mom | 2026-11-19 | FAIL | beats_index_and_basket: 9.71% vs index 12.74% vs basket 16.1%; DSR 0.808 (4 trials). Not a cost effect (charges 0.55%/yr); exposure only 19-47%. |
+| ew_winners_top20 | 2026-11-19 | FAIL | beats_index_and_basket: 9.62% vs index 12.74% vs basket 16.1%; DSR 0.818 (5 trials). Partly cost: 2.12%/yr charges at 5,000; 12.8% at 25,000, 16.6% at 100,000 (but fails most-years gate). Correlation with momentum 0.85. |
+
+| nse_norm_mom | 2026-11-19 | FAIL | beats_index_and_basket: 6.9% vs index 12.74% vs basket 16.1%; DSR 0.784 (6 trials). Not a cost effect (charges 0.62%/yr; no better at 100,000). Exposure low (bear exit / regime filter). Correlation with momentum 0.85. |
 
 Fresh start 2026-11-18 (second reset, at the user's request): the trial registry (now counting from 0) and the journal were
 emptied, and the Done table below was cleared. The earlier verdicts (frog_pan, int_mom, max_lottery, trend_ma, str_rev,

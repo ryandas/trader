@@ -21,6 +21,80 @@ from test_strategies_backtest import synth
 P = mom.MomParams(lookback=126, skip=21, top_n=5, buffer=3)
 
 
+def test_nse_norm_mom_prefers_smooth_winner_and_has_no_lookahead():
+    from trader.research.candidates import nse_norm_mom
+    idx = pd.bdate_range("2023-01-01", periods=400)
+    rng = np.random.default_rng(5)
+    smooth = 100 * np.exp(np.cumsum(rng.normal(0.002, 0.004, 400)))
+    jumpy = 100 * np.exp(np.cumsum(rng.normal(0.002, 0.04, 400)))
+    loser = 100 * np.exp(np.cumsum(rng.normal(-0.002, 0.01, 400)))
+    prep = types.SimpleNamespace(close_df=pd.DataFrame({"smooth": smooth, "jumpy": jumpy, "loser": loser}, index=idx))
+    s = nse_norm_mom.score(prep)
+    assert np.isnan(s[200]).all() and s[-1][0] > s[-1][1] and s[-1][0] > s[-1][2]
+    c2 = prep.close_df.copy()
+    c2.iloc[380:] *= 4  # changing future bars must not change an earlier score
+    s2 = nse_norm_mom.score(types.SimpleNamespace(close_df=c2))
+    np.testing.assert_allclose(s[350], s2[350])
+
+
+def test_high_52w_prefers_stock_near_its_high_and_has_no_lookahead():
+    from trader.research.candidates import high_52w
+    idx = pd.bdate_range("2024-01-01", periods=300)
+    near = np.linspace(100, 200, 300)  # always at its high
+    far = np.concatenate([np.linspace(100, 300, 150), np.linspace(300, 150, 150)])  # fell from its high
+    prep = types.SimpleNamespace(close_df=pd.DataFrame({"near": near, "far": far}, index=idx))
+    s = high_52w.score(prep, window=252)
+    assert np.isnan(s[200]).all() and s[-1][0] == 1.0 and s[-1][1] < 1.0
+    c2 = prep.close_df.copy()
+    c2.iloc[280:] *= 5
+    s2 = high_52w.score(types.SimpleNamespace(close_df=c2), window=252)
+    np.testing.assert_allclose(s[270], s2[270])
+
+
+def test_low_vol_score_prefers_calm_and_has_no_lookahead():
+    from trader.research.candidates import low_vol
+    idx = pd.bdate_range("2024-01-01", periods=300)
+    rng = np.random.default_rng(3)
+    calm = 100 * np.exp(np.cumsum(rng.normal(0, 0.005, 300)))
+    wild = 100 * np.exp(np.cumsum(rng.normal(0, 0.03, 300)))
+    prep = types.SimpleNamespace(close_df=pd.DataFrame({"calm": calm, "wild": wild}, index=idx))
+    s = low_vol.score(prep, window=126)
+    assert np.isnan(s[100]).all() and s[-1][0] > s[-1][1]
+    c2 = prep.close_df.copy()
+    c2.iloc[250:] *= 3  # changing future bars must not change an earlier score
+    s2 = low_vol.score(types.SimpleNamespace(close_df=c2), window=126)
+    np.testing.assert_allclose(s[200], s2[200])
+
+
+def test_sector_mom_ranks_by_sector_and_has_no_lookahead():
+    from trader.research.candidates import sector_mom
+    idx = pd.bdate_range("2024-01-01", periods=300)
+    up = {f"u{i}": np.linspace(100, 200 + i, 300) for i in range(3)}
+    dn = {f"d{i}": np.linspace(100, 60 + i, 300) for i in range(3)}
+    df = pd.DataFrame({**up, **dn, "x": np.linspace(100, 500, 300)}, index=idx)
+    sectors = ["Up"] * 3 + ["Down"] * 3 + ["Unknown"]
+    prep = types.SimpleNamespace(close_df=df, sectors=sectors)
+    s = sector_mom.score(prep)
+    assert np.isnan(s[100]).all() and np.isnan(s[-1][6])
+    assert s[-1][:3].min() > s[-1][3:6].max()
+    c2 = df.copy()
+    c2.iloc[250:] *= 3
+    s2 = sector_mom.score(types.SimpleNamespace(close_df=c2, sectors=sectors))
+    np.testing.assert_allclose(s[200], s2[200])
+
+
+def test_ew_winners_score_is_12_1_return_without_lookahead():
+    from trader.research.candidates import ew_winners_top20 as ew
+    idx = pd.bdate_range("2024-01-01", periods=400)
+    df = pd.DataFrame({"a": np.linspace(100, 300, 400), "b": np.linspace(100, 110, 400)}, index=idx)
+    s = ew.score(types.SimpleNamespace(close_df=df))
+    assert np.isnan(s[200]).all() and s[-1][0] > s[-1][1]
+    np.testing.assert_allclose(s[300][0], df["a"].iloc[279] / df["a"].iloc[48] - 1)
+    c2 = df.copy()
+    c2.iloc[350:] *= 4
+    np.testing.assert_allclose(s[300], ew.score(types.SimpleNamespace(close_df=c2))[300])
+
+
 # ---------------------------------------------------------------- deflated Sharpe
 def test_dsr_single_trial_is_probabilistic_sharpe():
     rng = np.random.default_rng(0)
