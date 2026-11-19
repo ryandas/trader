@@ -61,6 +61,12 @@ class MomentumCfg(BaseModel):
     bear_exit: bool = True  # sell everything when the market turns bearish, not just at rebalance
 
 
+class AccountCfg(BaseModel):
+    """Shared paper account (ledger.py). PROVISIONAL, owner to review."""
+
+    max_sleeve_share: float = 0.40  # a sleeve's positions may not exceed this share of account equity (1.0 = no cap)
+
+
 class Config(BaseModel):
     mode: Literal["paper", "live"] = "paper"  # "live" is not implemented; nothing in src/ places orders
     capital: float = 100_000
@@ -74,6 +80,7 @@ class Config(BaseModel):
     risk: RiskCfg = RiskCfg()
     costs: CostCfg = CostCfg()
     research: ResearchCfg = ResearchCfg()
+    account: AccountCfg = AccountCfg()
 
 
 def load_config(path: Path | None = None) -> Config:

@@ -33,6 +33,9 @@ costs:                      # delivery equity; see CostCfg for statutory default
   brokerage_per_order: 0    # check your Dhan plan
   slippage_bps: 5
 
+account:                    # shared paper account (PROVISIONAL, see AGENTS.md "Shared account")
+  max_sleeve_share: 0.40    # a sleeve's positions (momentum, swing, each candidate) may not exceed this share of account equity
+
 research:                   # fixed gates for harness v4 (review if capital/contribution changes)
   dsr_min: 0.95
   max_annual_charges_pct: 3.0
