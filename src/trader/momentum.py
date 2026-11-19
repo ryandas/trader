@@ -244,23 +244,36 @@ class MomBook:
             })
             del self.sells[si]
 
-    def buy_at_open(self, d: int, min_fraction: float = 0.0) -> None:
-        """Fill the queued buys. A buy is cut to the cash available; if the cut is below `min_fraction` of the intended
-        quantity it is skipped (shared account only; a lone sleeve passes 0 and is never cash-limited in practice)."""
+    def buy_at_open(self, d: int, min_fraction: float = 0.0, room: float = math.inf) -> None:
+        """Fill the queued buys. A buy is cut to the cash available and to `room` (how much more position value the
+        shared account's sleeve cap lets this sleeve add); if the cut is below `min_fraction` of the intended quantity it
+        is skipped (shared account only; a lone sleeve passes 0 and is never limited in practice)."""
         o, cc = self.prep.o, self.cfg.costs
         for si, tv in self.buys:
             if si in self.pos or math.isnan(o[d, si]):
                 continue
             fp = apply_slippage(o[d, si], "buy", cc.slippage_bps)
-            qty = math.floor(min(tv, self.cash.value) / (fp * 1.004))  # headroom for charges
+            qty = math.floor(min(tv, self.cash.value, room) / (fp * 1.004))  # headroom for charges
             if qty < 1 or (min_fraction and qty < min_fraction * math.floor(tv / (fp * 1.004))):
                 continue
             val = fp * qty
             cost = trade_costs("buy", val, cc)
             self.cash.value -= val + cost
             self.traded_value += val
+            room -= val
             self.pos[si] = {"qty": qty, "px": fp, "cost": cost, "d": d}
         self.buys = []
+
+    def value_at_open(self, d: int) -> float:
+        """Positions valued at today's open (last close, then entry price, when there is no bar): no lookahead."""
+        c, o = self.prep.c, self.prep.o
+        tot = 0.0
+        for si, q in self.pos.items():
+            px = o[d, si]
+            if math.isnan(px):
+                px = c[d - 1, si] if d > 0 else math.nan
+            tot += q["qty"] * (q["px"] if math.isnan(px) else px)
+        return tot
 
     def invested(self, d: int) -> float:
         return sum(q["qty"] * self.prep.c[d, si] for si, q in self.pos.items())

@@ -248,9 +248,18 @@ class SwingBook:
             if r:
                 self.close_pos(pos, r[0], d, r[1])
 
-    def fills(self, d: int, min_fraction: float = 0.0) -> None:
-        """Fill the orders queued at the previous close. A buy is cut to the cash available; if the cut is below
-        `min_fraction` of the ordered quantity it is skipped (shared account only: a lone sleeve passes 0)."""
+    def value_at_open(self, d: int) -> float:
+        """Positions valued at today's open (last close when there is no bar): no lookahead."""
+        tot = 0.0
+        for sym, pos in self.positions.items():
+            o = self.prep.data[sym].o[d]
+            tot += pos.qty * (pos.last_close if math.isnan(o) else o)
+        return tot
+
+    def fills(self, d: int, min_fraction: float = 0.0, room: float = math.inf) -> None:
+        """Fill the orders queued at the previous close. A buy is cut to the cash available and to `room` (the shared
+        account's sleeve cap); if the cut is below `min_fraction` of the ordered quantity it is skipped (shared account
+        only: a lone sleeve passes 0 and is never limited)."""
         data, cc = self.prep.data, self.cfg.costs
         for od in self.pending:
             sd = data[od.sym]
@@ -262,11 +271,14 @@ class SwingBook:
                 continue
             fp = apply_slippage(p, "buy", cc.slippage_bps)
             qty = min(od.qty, math.floor(self.cash.value / (fp * 1.01)))
+            if room < math.inf:
+                qty = min(qty, math.floor(room / fp))
             if qty < 1 or (min_fraction and qty < min_fraction * od.qty):
                 continue
             value = fp * qty
             cost = trade_costs("buy", value, cc)
             self.cash.value -= value + cost
+            room -= value
             pos = Position(
                 od.sym, od.strat, od.key, od.mkt, sd.sector, qty, fp, self.prep.dates[d], cost, od.stop, od.stop,
                 od.target, od.max_hold, last_close=p,
