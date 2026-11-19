@@ -30,6 +30,7 @@ uv run trader paper-momentum [--start DATE] [--liquid-top N] [--reset]   # start
 uv run trader paper-init [--start DATE] [--reset]   # (optional) add swing sleeve, freezing params + selector stats; --reset leaves momentum alone
 uv run trader paper-drop-swing                      # remove swing sleeve; momentum kept
 uv run trader daily [--asof DATE] [--no-update]     # update data, advance ledger sleeves, store the report as `daily/<date>` (read it: `trader show daily`; ~5 min with update, candle load over the network ~1 min)
+uv run python scripts/paper_report_chart.py [--out PATH]   # PNG of ledger equity per sleeve, open positions, queued orders (from Postgres); default charts/paper_report_<date>.png (gitignored). `trader_daily.sh` runs it after each daily run.
 uv run trader fundamentals-snapshot [--if-stale-days N]   # save today's fundamentals as a dated snapshot in the fundamentals table (a few minutes)
 uv run trader research-eval SLUG [--recheck]        # fixed gates on a candidate in src/trader/research/candidates/; records a trial (--recheck = not counted)
 uv run trader research-promote SLUG                 # freeze a PASS / FORWARD_ONLY candidate into the ledger as its own paper sleeve (max 5)

@@ -47,6 +47,12 @@ rc=1
       grep -E '^(WARNING|momentum sleeve|swing sleeve|candidate |report: |orders: |[0-9]{4}-[0-9]{2}-[0-9]{2} \|)' "$log"
       echo "✅ Run OK · log: $log"
     fi
+    # Ledger chart (PNG in charts/, path echoed to the message). A failure here never fails the run.
+    if chart=$(timeout 300 uv run python "$SCRIPT_DIR/paper_report_chart.py" 2>>"$log"); then
+      echo "📈 Chart: $chart"
+    else
+      echo "⚠️ chart not generated (see log)"
+    fi
   else
     echo "❌ Trader daily run FAILED (exit non-zero). Last 40 log lines:"
     tail -n 40 "$log"
