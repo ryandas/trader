@@ -14,6 +14,7 @@ from trader import ledger, outputs, paper, report
 from trader import momentum as mom
 from trader.accounting import CashBox
 from trader.config import Config
+from trader.costs import apply_slippage, trade_costs
 from trader.selector import Selector
 from trader.strategies import ALL
 
@@ -111,38 +112,86 @@ def _books(acct, cash):
     return cfg, idx, sprep, mprep, box, swing, mbook
 
 
+def buy_cost(cfg, open_px, qty):
+    """Cash a buy of `qty` shares takes at the open: shares x (open + 5 bps slippage) + the statutory charges."""
+    fp = apply_slippage(open_px, "buy", cfg.costs.slippage_bps)
+    return qty * fp + trade_costs("buy", qty * fp, cfg.costs)
+
+
+def _swing_order(sprep, sym, qty, d=400):
+    px = float(sprep.data[sym].o[d])
+    return bt.Order(sym, "breakout", "breakout#0", 2, "open", None, None, px * 0.5, None, qty, px, None)
+
+
+# Hand calculation (day 400 opens: S1 152.424, S3 304.427, S5 190.739, S6 263.736; buy fill = open x 1.0005;
+# momentum qty = floor(limit / (fill x 1.004)); swing qty = min(order qty, floor(cash / (fill x 1.01)), floor(room / fill))):
+#   S3 fill 304.579 -> divisor 305.797;  S5 fill 190.834 -> cash divisor 192.742.
+# Sleeves: momentum (buying S3), swing (buying S5), and a candidate that only HOLDS 40 x S1 (6,096.96 at the open) -> N = 3.
+# Cash 4,000 -> equity 10,096.96 -> budget 3,365.65 each. The holder is over budget (room 0) and sits on its shares, so
+# the 4,000 of cash is scarcer than the room of the other two (2 x 3,365).
+#   momentum wants 3,300 of S3: min(3,300, 4,000, 3,365.65)/305.797 = 10.79 -> 10 shares; intended floor(3,300/305.797) = 10,
+#     so it is a full fill. Spends 10 x 304.579 = 3,045.79 + charges -> cash left ~950.
+#   swing's order is 30 x S5 (~5,725 > the whole 4,000 of cash): min(30, floor(950/192.742) = 4, floor(3,365.65/190.834) = 17)
+#     = 4 shares, below half of 30 (15) -> SKIPPED. If swing went first it would take 17 (3,244) and momentum would be
+#     left with 2 shares of 10 and skipped: that is the starvation this test pins.
 def test_momentum_rebalance_buy_is_not_starved_by_swing_buy_on_the_same_day(acct):
     d = 400
-    sym = "S3"
-    cfg, idx, sprep, mprep, box, swing, mbook = _books(acct, 10_000.0)
-    si = mprep.syms.index(sym)
-    target = 9_000.0
-    mbook.buys = [(si, target)]
-    # a swing order on another name that would eat all the cash if it were processed first
-    other = "S5"
-    px = float(sprep.data[other].o[d])
-    swing.pending = [bt.Order(other, "breakout", "breakout#0", 2, "open", None, None, px * 0.9, None, 1000, px, None)]
-    ledger.open_session(d, swing, mbook, cfg.min_size_fraction)
-    qty_mom = mbook.pos[si]["qty"]
-    fp = mbook.pos[si]["px"]
-    # momentum fills first, up to its budget (half of the 10,000 account with swing present), whatever swing asks
-    assert qty_mom == int(5_000.0 // (fp * 1.004))
-    assert box.value >= 0
-    # swing got only what was left: cut to the cash available or skipped by min_size_fraction, never negative cash
-    assert (other not in swing.positions) or swing.positions[other].qty < 1000
+    cfg, idx, sprep, mprep, box, swing, mbook = _books(acct, 4_000.0)
+    holder = mom.MomBook(cfg, mprep, MP, box)
+    s1 = mprep.syms.index("S1")
+    holder.pos[s1] = {"qty": 40, "px": float(mprep.o[d, s1]), "cost": 0.0, "d": d - 5}
+    s3 = mprep.syms.index("S3")
+    mbook.buys = [(s3, 3_300.0)]
+    swing.pending = [_swing_order(sprep, "S5", 30)]
+    ledger.open_session(d, swing, mbook, cfg.min_size_fraction, cands=[holder])
+    assert mbook.pos[s3]["qty"] == 10  # momentum first, in full
+    assert "S5" not in swing.positions  # swing left with 4 shares of 30: skipped
+    assert box.value == pytest.approx(4_000.0 - buy_cost(cfg, float(mprep.o[d, s3]), 10))
+    assert list(holder.pos) == [s1] and holder.pos[s1]["qty"] == 40  # the holder only holds
 
 
+# Hand calculation (S3 divisor 305.797, so a 1,000 cash account buys at most 3 shares; same prices as above):
+#   alone: momentum asks 9,000 -> intended floor(9,000/305.797) = 29 shares (half = 14.5).
+#     cash 1,000: floor(1,000/305.797) = 3 < 14.5 -> skipped, cash stays exactly 1,000.
+#     cash 6,000: floor(6,000/305.797) = 19 >= 14.5 -> taken, 19 shares: 19 x 304.579 = 5,786.99 + charges.
 def test_cash_short_buy_is_cut_to_cash_and_tiny_cuts_are_skipped(acct):
     d = 400
     cfg, idx, sprep, mprep, box, swing, mbook = _books(acct, 1_000.0)
     si = mprep.syms.index("S3")
-    mbook.buys = [(si, 9_000.0)]  # cash covers ~11% of the target: below min_size_fraction -> skipped
+    mbook.buys = [(si, 9_000.0)]  # cash covers 3 of 29 shares: below min_size_fraction -> skipped
     ledger.open_session(d, None, mbook, cfg.min_size_fraction)  # momentum alone: its budget is the whole account
     assert si not in mbook.pos and box.value == 1_000.0
     cfg, idx, sprep, mprep, box, swing, mbook = _books(acct, 6_000.0)
-    mbook.buys = [(si, 9_000.0)]  # 67% of target: cut to cash and taken
+    mbook.buys = [(si, 9_000.0)]  # 19 of 29 shares: cut to cash and taken
     ledger.open_session(d, None, mbook, cfg.min_size_fraction)
-    assert si in mbook.pos and 0 <= box.value < 6_000.0
+    assert mbook.pos[si]["qty"] == 19
+    assert box.value == pytest.approx(6_000.0 - buy_cost(cfg, float(mprep.o[d, si]), 19))
+
+
+# Hand calculation, with swing present (N = 2, so the budget is equity / 2; S5 fill 190.834, cash divisor 192.742):
+#   cash 1,000 -> budget 500. Momentum asks 9,000 (29 shares): min(9,000, 1,000, 500)/305.797 = 1 share < 14.5 -> skipped.
+#     Swing asks 20 x S5: min(20, floor(1,000/192.742) = 5, floor(500/190.834) = 2) = 2 < 10 -> skipped. Cash stays 1,000.
+#   cash 6,000 -> budget 3,000. Momentum asks 5,000 (intended floor(5,000/305.797) = 16, half = 8): the limit is the budget,
+#     floor(3,000/305.797) = 9 >= 8 -> 9 shares (2,741.21 + charges -> cash left ~3,255).
+#     Swing asks 20 x S5: min(20, floor(3,255/192.742) = 16, floor(3,000/190.834) = 15) = 15 >= 10 -> 15 shares: the
+#     BUDGET (15), not the cash (16) and not the order (20), is what cuts it.
+def test_cash_short_buy_with_swing_present_is_cut_by_cash_and_budget(acct):
+    d = 400
+    cfg, idx, sprep, mprep, box, swing, mbook = _books(acct, 1_000.0)
+    s3 = mprep.syms.index("S3")
+    mbook.buys = [(s3, 9_000.0)]
+    swing.pending = [_swing_order(sprep, "S5", 20)]
+    ledger.open_session(d, swing, mbook, cfg.min_size_fraction)
+    assert s3 not in mbook.pos and "S5" not in swing.positions and box.value == 1_000.0
+
+    cfg, idx, sprep, mprep, box, swing, mbook = _books(acct, 6_000.0)
+    mbook.buys = [(s3, 5_000.0)]
+    swing.pending = [_swing_order(sprep, "S5", 20)]
+    ledger.open_session(d, swing, mbook, cfg.min_size_fraction)
+    assert mbook.pos[s3]["qty"] == 9
+    assert swing.positions["S5"].qty == 15
+    spent = buy_cost(cfg, float(mprep.o[d, s3]), 9) + buy_cost(cfg, float(sprep.data["S5"].o[d]), 15)
+    assert box.value == pytest.approx(6_000.0 - spent)
 
 
 def test_momentum_target_is_a_share_of_its_budget(acct):

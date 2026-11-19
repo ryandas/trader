@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 import yaml
 
-from test_account import CAPITAL, DEPOSIT, MP, _books, acct  # noqa: F401  (acct is a fixture)
+from test_account import CAPITAL, DEPOSIT, MP, _books, acct, buy_cost  # noqa: F401  (acct is a fixture)
 from test_research import HONEST, _ledger, lab  # noqa: F401  (lab is a fixture)
 from trader import backtest as bt
 from trader import ledger, paper
@@ -82,16 +82,51 @@ def _open(acct, cash, momq=None, swingq=None, candq=(), held=None, d=400):
     return box, swing, mbook, cbooks, mprep, sprep
 
 
+# Hand calculation (day 400 opens: S1 152.424, S3 304.427, S5 190.739, S6 263.736, S7 135.447; buy fill = open x 1.0005;
+# momentum/candidate qty = floor(min(target, cash, room) / (fill x 1.004)); swing qty = min(order qty, floor(cash / (fill x 1.01)),
+# floor(room / fill)); divisors: S3 305.797, S5 190.834 (cash 192.742), S6 264.923).
+# Four sleeves: momentum, swing, candidate c0 (the three that buy) and candidate c1, which only HOLDS 30 x S1 (4,572.72).
+# Cash 3,000 -> equity 7,572.72 -> budget 1,893.18 each; the holder is over budget (room 0), so cash (3,000) is scarcer
+# than the room of the three buyers (3 x 1,893), and the ORDER decides who is cut.
+#   1. momentum asks 1,500 of S3: min(1,500, 3,000, 1,893.18)/305.797 = 4.9 -> 4 shares (intended 4: full).
+#      Spends 4 x 304.579 = 1,218.32 + ~1.5 charges -> cash ~1,780.
+#   2. swing's order is int(1,200 // 190.739) = 6 x S5: min(6, floor(1,780/192.742) = 9, floor(1,893.18/190.834) = 9) = 6 (full).
+#      Spends 6 x 190.834 = 1,145.00 + ~1.4 -> cash ~633.8.
+#   3. c0 asks 1,000 of S6: intended floor(1,000/264.923) = 3; min(1,000, 633.8, 1,893.18)/264.923 = 2.39 -> 2 shares,
+#      2 >= 0.5 x 3 = 1.5 so it is TAKEN (cut to the cash left, not skipped). Cash ends ~ 633.8 - 527.7 - 0.6 = ~105.
+#   4. c1 asks 1,000 of S7 but its room is max(1,893.18 - 4,572.72, 0) = 0 -> nothing.
+# Candidate before swing would give c0 3 shares and swing 5, so the numbers 4 / 6 / 2 pin momentum -> swing -> candidate.
 def test_arbitration_buys_go_momentum_then_swing_then_candidates(acct):
-    # A sleeve already holds ~8,000 of a 10,000 account, so cash (2,000) is scarcer than the three budgets (~3,333).
-    # (1) the candidate holds it: momentum buys first and takes the cash; swing is left with too little and is skipped
-    box, swing, mbook, (c0,), mprep, sprep = _open(acct, 2_000.0, momq=("S3", 3_300.0), swingq=("S5", 3_300.0),
-                                                   candq=[("S6", 3_300.0)], held=(1, "S1", 80))
-    assert mbook.pos and "S5" not in swing.positions and box.value >= 0
-    # (2) momentum holds it (no buy of its own): swing buys before the candidate, which is left with nothing
-    box, swing, mbook, (c0,), mprep, sprep = _open(acct, 2_000.0, swingq=("S5", 3_300.0), candq=[("S6", 3_300.0)],
-                                                   held=(0, "S1", 80))
-    assert "S5" in swing.positions and not c0.pos and box.value >= 0
+    cfg = acct[0]
+    box, swing, mbook, (c0, c1), mprep, sprep = _open(
+        acct, 3_000.0, momq=("S3", 1_500.0), swingq=("S5", 1_200.0), candq=[("S6", 1_000.0), ("S7", 1_000.0)],
+        held=(2, "S1", 30))
+    s1, s3, s6 = (mprep.syms.index(s) for s in ("S1", "S3", "S6"))
+    assert {si: q["qty"] for si, q in mbook.pos.items()} == {s3: 4}
+    assert {sym: p.qty for sym, p in swing.positions.items()} == {"S5": 6}
+    assert {si: q["qty"] for si, q in c0.pos.items()} == {s6: 2}  # the candidate was checked: cut 3 -> 2, not skipped
+    assert {si: q["qty"] for si, q in c1.pos.items()} == {s1: 30}  # over budget: bought nothing
+    spent = (buy_cost(cfg, float(mprep.o[400, s3]), 4) + buy_cost(cfg, float(sprep.data["S5"].o[400]), 6)
+             + buy_cost(cfg, float(mprep.o[400, s6]), 2))
+    assert box.value == pytest.approx(3_000.0 - spent)
+
+
+# Hand calculation (same prices and divisors as above). Three sleeves: momentum (buying S3), swing (buying S5), and a
+# candidate that only HOLDS 40 x S1 (6,096.96). Cash 4,000 -> equity 10,096.96 -> budget 3,365.65 (the holder is over it).
+#   momentum asks 2,000 of S3: floor(2,000/305.797) = 6 shares (full; 6 x 304.579 = 1,827.47 + ~2.1) -> cash ~2,170.
+#   swing's order is 20 x S5 (~3,815, MORE than the 2,170 left): min(20, floor(2,170/192.742) = 11, floor(3,365.65/190.834) = 17)
+#     = 11 shares; 11 >= 0.5 x 20 = 10, so it is CUT TO THE REMAINDER and taken (11 x 190.834 = 2,099.17 + ~2.4 -> cash ~69).
+#   Swing first would take 17 shares (3,244) and leave momentum 2 shares of 6 (below 3): skipped.
+def test_swing_order_larger_than_momentums_leftover_cash_is_cut_to_the_remainder(acct):
+    cfg = acct[0]
+    box, swing, mbook, (holder,), mprep, sprep = _open(
+        acct, 4_000.0, momq=("S3", 2_000.0), swingq=("S5", 3_820.0), candq=[("S7", 100.0)], held=(1, "S1", 40))
+    s1, s3 = mprep.syms.index("S1"), mprep.syms.index("S3")  # swing value 3,820 sizes to int(3,820 // 190.739) = 20 shares
+    assert {si: q["qty"] for si, q in mbook.pos.items()} == {s3: 6}
+    assert {sym: p.qty for sym, p in swing.positions.items()} == {"S5": 11}
+    assert {si: q["qty"] for si, q in holder.pos.items()} == {s1: 40}
+    spent = buy_cost(cfg, float(mprep.o[400, s3]), 6) + buy_cost(cfg, float(sprep.data["S5"].o[400]), 11)
+    assert box.value == pytest.approx(4_000.0 - spent)
 
 
 def test_candidate_buys_in_promotion_order(acct):

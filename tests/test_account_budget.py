@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from test_account import MP, _books, acct  # noqa: F401  (acct is a fixture)
+from test_account import MP, _books, acct, buy_cost  # noqa: F401  (acct is a fixture)
 from test_account_candidates import CP
 from trader import backtest as bt
 from trader import ledger
@@ -35,15 +35,35 @@ def _open(acct, cash, momq=None, swingq=None, candq=(), with_swing=True, with_mo
     ledger.open_session(D, swing if with_swing else None, mbook if with_mom else None, cfg.min_size_fraction,
                         cands=cbooks)
     sval = sum(p.qty * sprep.data[s].o[D] for s, p in swing.positions.items())
+    _open.books = (swing, mbook, cbooks, mprep, sprep, cfg)  # for tests that assert exact quantities
     return box, mbook.value_at_open(D), sval, [c.value_at_open(D) for c in cbooks]
 
 
+def _qty(book, sym):
+    """Shares held in `sym` by a momentum/candidate book or a swing book (0 when none)."""
+    if hasattr(book, "positions"):
+        return book.positions[sym].qty if sym in book.positions else 0
+    mprep = _open.books[3]
+    si = mprep.syms.index(sym)
+    return book.pos[si]["qty"] if si in book.pos else 0
+
+
+# Hand calculation (day 400 opens: S3 304.427, S5 190.739, S6 263.736; buy fill = open x 1.0005; momentum/candidate qty =
+# floor(min(target, cash, room) / (fill x 1.004)); swing qty = min(order qty, floor(cash / (fill x 1.01)), floor(room / fill))).
+# Equity 90,000 (all cash), N = 3 -> budget 30,000 each; every sleeve asks for 50,000, so the budget is what cuts it.
+#   momentum S3: divisor 305.797; floor(30,000/305.797) = 98 (intended floor(50,000/305.797) = 163; 98 >= 81.5) -> 98 shares.
+#   swing S5: order int(50,000 // 190.739) = 262; budget limit floor(30,000/190.834) = 157 (157 >= 131) -> 157 shares.
+#   candidate S6: divisor 264.923; floor(30,000/264.923) = 113 (intended 188; 113 >= 94) -> 113 shares.
+#   Spend ~ 29,849 + 29,961 + 29,816 + ~105 charges = ~89,730, so cash (30,000 left before the candidate) never binds.
 def test_a_three_sleeves_each_stay_within_a_third_of_equity_at_the_open(acct):
-    # equity 90,000 -> budget 30,000 each; every sleeve asks for 50,000
     box, m, s, (c,) = _open(acct, 90_000.0, momq=("S3", 50_000.0), swingq=("S5", 50_000.0), candq=[("S6", 50_000.0)])
-    for v in (m, s, c):
-        assert 0.5 * 30_000 < v <= 30_000 * TOL  # taken at the budget, not skipped and not above it
-    assert box.value >= 0
+    swing, mbook, (c0,), mprep, sprep, cfg = _open.books
+    assert _qty(mbook, "S3") == 98
+    assert _qty(swing, "S5") == 157
+    assert _qty(c0, "S6") == 113
+    spent = (buy_cost(cfg, float(mprep.o[D, mprep.syms.index("S3")]), 98) + buy_cost(cfg, float(sprep.data["S5"].o[D]), 157)
+             + buy_cost(cfg, float(mprep.o[D, mprep.syms.index("S6")]), 113))
+    assert box.value == pytest.approx(90_000.0 - spent)
 
 
 def test_b_momentum_alone_has_the_whole_account_as_budget(acct):
@@ -60,18 +80,29 @@ def test_b_momentum_alone_has_the_whole_account_as_budget(acct):
     assert mbook.value_at_open(D) <= equity * TOL
 
 
+# Hand calculation (prices as above): equity 10,000, N = 2 -> budget 5,000 each. Both ask for 9,000.
+#   momentum S3: floor(min(9,000, 10,000, 5,000)/305.797) = 16 (intended 29; 16 >= 14.5) -> 16 shares (4,873.27 + ~5.7), cash ~5,121.
+#   swing S5: order int(9,000 // 190.739) = 47; min(47, floor(5,121/192.742) = 26, floor(5,000/190.834) = 26) = 26 (26 >= 23.5)
+#     -> 26 shares (4,961.69 + ~5.8). Momentum is capped at its half although it asked for 9,000 and cash allowed it; if the
+#     budget were a third (3,333) momentum would get 10 shares (< 14.5) and be skipped.
 def test_c_two_sleeves_get_half_each(acct):
     box, m, s, _ = _open(acct, 10_000.0, momq=("S3", 9_000.0), swingq=("S5", 9_000.0))
-    assert 0.5 * 5_000 < m <= 5_000 * TOL  # momentum capped at its half although it asked for 9,000 and cash allowed it
-    assert 0.5 * 5_000 < s <= 5_000 * TOL  # swing gets its own half rather than what momentum left
-    assert box.value >= 0
+    swing, mbook, _c, mprep, sprep, cfg = _open.books
+    assert _qty(mbook, "S3") == 16
+    assert _qty(swing, "S5") == 26
+    spent = buy_cost(cfg, float(mprep.o[D, mprep.syms.index("S3")]), 16) + buy_cost(cfg, float(sprep.data["S5"].o[D]), 26)
+    assert box.value == pytest.approx(10_000.0 - spent)
 
 
+# Hand calculation: equity 10,000, N = 2 (momentum is active but asks for nothing) -> budget 5,000. Swing S5 asks for 9,000:
+#   min(47, floor(10,000/192.742) = 51, floor(5,000/190.834) = 26) = 26 shares (4,961.69 + ~5.8): the idle half is NOT
+#   handed to swing (it would take 47), so cash ends ~5,032.5.
 def test_unused_budget_is_not_reassigned(acct):
-    # momentum asks for nothing: swing still may not exceed half the account
     box, m, s, _ = _open(acct, 10_000.0, swingq=("S5", 9_000.0))
-    assert m == 0 and 0 < s <= 5_000 * TOL
-    assert box.value >= 5_000 * 0.99  # the idle half stays cash
+    swing, mbook, _c, mprep, sprep, cfg = _open.books
+    assert m == 0 and not mbook.pos
+    assert _qty(swing, "S5") == 26
+    assert box.value == pytest.approx(10_000.0 - buy_cost(cfg, float(sprep.data["S5"].o[D]), 26))
 
 
 def test_existing_holdings_count_towards_the_budget(acct):
