@@ -18,7 +18,7 @@ AQR, arXiv q-fin, NSE/BSE methodologies, Indian journals), at most 5 new rows pe
 
 | slug | idea | mechanism | source |
 |---|---|---|---|
-| quality_india | (forward-only fundamentals; check which fields the snapshot holds before writing) Long-only quality (profitability / low leverage) top ~10 names, quarterly. Price/volume queue is EMPTY: no backtestable idea queued. | Profitable, stable firms are mispriced relative to their quality; long-only version is lower churn and lower risk. Published effects often weaken after publication. | SSRN 4284686, quality factor in India (abstract seen in search 2026-11-19: QMJ 4-factor alpha 0.92%/month, long-only 0.69%/month); full text not opened. Working paper. |
+| (empty) | Price/volume queue is EMPTY: no backtestable idea queued. Liquidity ideas (Amihud) need a volume matrix in `MomPrep` first. | | |
 
 ## Done
 
@@ -31,6 +31,7 @@ AQR, arXiv q-fin, NSE/BSE methodologies, Indian journals), at most 5 new rows pe
 | ew_winners_top20 | 2026-11-19 | FAIL | beats_index_and_basket: 9.62% vs index 12.74% vs basket 16.1%; DSR 0.818 (5 trials). Partly cost: 2.12%/yr charges at 5,000; 12.8% at 25,000, 16.6% at 100,000 (but fails most-years gate). Correlation with momentum 0.85. |
 
 | nse_norm_mom | 2026-11-19 | FAIL | beats_index_and_basket: 6.9% vs index 12.74% vs basket 16.1%; DSR 0.784 (6 trials). Not a cost effect (charges 0.62%/yr; no better at 100,000). Exposure low (bear exit / regime filter). Correlation with momentum 0.85. |
+| quality_india | 2026-11-19 | FORWARD_ONLY | Fundamentals, no backtest. Gates: no_lookahead, snapshots (1), not_a_duplicate (corr 0.03) all pass. Trial 7. Awaiting approval to promote. |
 
 Fresh start 2026-11-18 (second reset, at the user's request): the trial registry (now counting from 0) and the journal were
 emptied, and the Done table below was cleared. The earlier verdicts (frog_pan, int_mom, max_lottery, trend_ma, str_rev,
