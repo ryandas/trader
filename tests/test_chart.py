@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from test_account import MP, _frames  # noqa: F401  (also provides the `world` fixture below)
+from helpers import MP, _frames
 from trader import db, paper
 from trader.config import ROOT, Config
 from helpers import patch_candles

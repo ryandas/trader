@@ -3,24 +3,10 @@ import pandas as pd
 import pytest
 
 from trader import backtest as bt
-from helpers import patch_candles
+from helpers import patch_candles, synth
 from trader.config import Config
 from trader.data import store
 from trader.strategies import ALL, features
-
-
-def synth(n=500, seed=1, drift=0.0006):
-    rng = np.random.default_rng(seed)
-    close = 200 * np.exp(np.cumsum(rng.normal(drift, 0.015, n)))
-    open_ = close * (1 + rng.normal(0, 0.004, n))
-    high = np.maximum(open_, close) * (1 + rng.uniform(0, 0.01, n))
-    low = np.minimum(open_, close) * (1 - rng.uniform(0, 0.01, n))
-    vol = rng.integers(2_000_000, 6_000_000, n).astype(float)
-    vol[::37] *= 3
-    return pd.DataFrame(
-        {"open": open_, "high": high, "low": low, "close": close, "volume": vol},
-        index=pd.bdate_range("2022-01-03", periods=n, name="date"),
-    )
 
 
 @pytest.mark.parametrize("name", list(ALL))

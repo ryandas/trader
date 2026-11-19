@@ -10,15 +10,13 @@ import pandas as pd
 import pytest
 import yaml
 
-from test_account import CAPITAL, DEPOSIT, MP, _books, acct, buy_cost  # noqa: F401  (acct is a fixture)
-from test_research import HONEST, _ledger, lab  # noqa: F401  (lab is a fixture)
+from helpers import CAPITAL, CP, DEPOSIT, HONEST, MP, _books, _ledger, buy_cost
 from trader import backtest as bt
 from trader import ledger, paper
 from trader import momentum as mom
 from trader.config import ROOT, Config
 from trader.selector import Selector
 
-CP = mom.MomParams(lookback=60, skip=5, top_n=3, buffer=2)  # a candidate sleeve: different ranking, 3 names
 
 
 def _run(acct, n_cands=1, end_i=520, start_i=300, cand_start_i=300, with_swing=True):

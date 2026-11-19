@@ -1,6 +1,4 @@
-import importlib
 import math
-import sys
 import types
 
 import numpy as np
@@ -8,15 +6,12 @@ import pandas as pd
 import pytest
 
 from trader import momentum as mom
-from helpers import patch_candles
+from helpers import HONEST, _ledger, patch_candles, synth, write_cand
 from trader import paper
 from trader.config import Config
 from trader.data import fundamentals as fund
-from trader.data import store
-from trader.research import candidates as cand_pkg
 from trader.research import dsr, evaluate, registry
 from test_momentum import world as mom_world
-from test_strategies_backtest import synth
 
 P = mom.MomParams(lookback=126, skip=21, top_n=5, buffer=3)
 
@@ -158,29 +153,6 @@ def test_lookahead_guard_passes_honest_and_catches_leaky(monkeypatch):
 
 
 # ---------------------------------------------------------------- registry
-@pytest.fixture
-def lab(monkeypatch, tmp_path, pg):
-    """Synthetic market + temp candidates dir; ledger, trials and outputs in the throwaway Postgres schema."""
-    frames = {f"S{i}": synth(700, seed=i, drift=0.0005 + 0.0002 * (i % 5)) for i in range(30)}
-    frames["NIFTY500"] = synth(700, seed=99, drift=0.0004)
-    patch_candles(monkeypatch, frames)
-    monkeypatch.setattr(evaluate, "PIT", False)  # synthetic market has no membership snapshots; tests cover gate logic
-    cdir = tmp_path / "cands"
-    cdir.mkdir()
-    monkeypatch.setattr(registry, "CANDIDATES_DIR", cdir)
-    monkeypatch.setattr(cand_pkg, "__path__", [str(cdir)])
-    sys.modules.pop("trader.research.candidates.t_leaky", None)
-    inst = pd.DataFrame({"symbol": [f"S{i}" for i in range(30)], "sector": "X"})
-    return Config(capital=1_000_000), inst, frames["NIFTY500"].index, cdir
-
-
-def write_cand(cdir, slug, body, grid="[{}]", extra=""):
-    (cdir / f"{slug}.py").write_text(
-        f'META = {{"slug": "{slug}", "kind": "rotation", "hypothesis": "h", "source": "s", "grid": {grid}{extra}}}\n{body}\n')
-    sys.modules.pop(f"trader.research.candidates.{slug}", None)
-    importlib.invalidate_caches()  # FileFinder caches dir listings; same-second writes are otherwise missed
-
-
 def test_registry_is_append_only_and_counts(lab):
     cfg, inst, idx, cdir = lab
     write_cand(cdir, "t_a", "def score(prep, **k):\n    return prep.score(126, 21)")
@@ -230,16 +202,6 @@ def test_fundamentals_asof_and_panel_never_use_later_snapshots(pg):
 
 
 # ---------------------------------------------------------------- promotion into the ledger
-def _ledger(lab, slug, body, extra=""):
-    cfg, inst, idx, cdir = lab
-    write_cand(cdir, slug, body, extra=extra)
-    paper.init_momentum(cfg, idx[300], mom.MomParams(top_n=5, buffer=3), None)
-    return cfg, inst, idx, cdir
-
-
-HONEST = "def score(prep, **k):\n    return (prep.close_df / prep.close_df.shift(60) - 1).to_numpy()"
-
-
 def test_promote_requires_passing_trial_then_sync_runs_sleeve_and_leaves_momentum_alone(lab):
     cfg, inst, idx, cdir = _ledger(lab, "t_ok", HONEST)
     with pytest.raises(SystemExit):  # never evaluated

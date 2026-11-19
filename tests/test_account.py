@@ -7,40 +7,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from helpers import patch_candles
-from test_strategies_backtest import synth
+from helpers import CAPITAL, DEPOSIT, MP, _books, _frames, buy_cost, patch_candles
 from trader import backtest as bt
 from trader import ledger, outputs, paper, report
 from trader import momentum as mom
-from trader.accounting import CashBox
 from trader.config import Config
-from trader.costs import apply_slippage, trade_costs
 from trader.selector import Selector
 from trader.strategies import ALL
-
-MP = mom.MomParams(lookback=126, skip=21, top_n=5, buffer=3)
-CAPITAL, DEPOSIT = 50_000.0, 5_000.0
-
-
-def _frames():
-    frames = {f"S{i}": synth(600, seed=i) for i in range(8)}
-    frames["NIFTY500"] = synth(600, seed=99, drift=0.0004)
-    return frames
-
-
-@pytest.fixture
-def acct(monkeypatch):
-    """(cfg, instruments, index, swing prep, strategies, mom prep) on synthetic candles; no database."""
-    frames = _frames()
-    patch_candles(monkeypatch, frames)
-    inst = pd.DataFrame({"symbol": [f"S{i}" for i in range(8)], "sector": list("AABBCCDD")})
-    cfg = Config(capital=CAPITAL, monthly_contribution=DEPOSIT)
-    strats = {f"{n}#0": ALL[n]() for n in ALL}
-    for k, s in strats.items():
-        s.key = k
-    sprep = bt.prepare(cfg, inst, list(strats.values()), filters=False)
-    mprep = mom.prepare(cfg, inst)
-    return cfg, inst, frames["NIFTY500"].index, sprep, strats, mprep
 
 
 def _run(acct, end_i=520, start_i=300, **kw):
@@ -102,20 +75,6 @@ def test_swing_only_account_matches_standalone_backtest(acct):
     solo = bt.run(cfg, sprep, strats, idx[300], idx[520], Selector(), emit_last=True)
     np.testing.assert_allclose(r.equity["value"], solo.equity["equity"])
     pd.testing.assert_frame_equal(r.swing.trades, solo.trades)
-
-
-def _books(acct, cash):
-    cfg, _, idx, sprep, strats, mprep = acct
-    box = CashBox(cash)
-    swing = bt.SwingBook(cfg, sprep, strats, box, Selector())
-    mbook = mom.MomBook(cfg, mprep, MP, box)
-    return cfg, idx, sprep, mprep, box, swing, mbook
-
-
-def buy_cost(cfg, open_px, qty):
-    """Cash a buy of `qty` shares takes at the open: shares x (open + 5 bps slippage) + the statutory charges."""
-    fp = apply_slippage(open_px, "buy", cfg.costs.slippage_bps)
-    return qty * fp + trade_costs("buy", qty * fp, cfg.costs)
 
 
 def _swing_order(sprep, sym, qty, d=400):

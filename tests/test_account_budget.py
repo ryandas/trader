@@ -9,8 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from test_account import MP, _books, acct, buy_cost  # noqa: F401  (acct is a fixture)
-from test_account_candidates import CP
+from helpers import CP, MP, _books, buy_cost
 from trader import backtest as bt
 from trader import ledger
 from trader import momentum as mom
