@@ -1,10 +1,12 @@
-"""Chart the paper ledger from Postgres: equity per sleeve, open positions, queued orders.
+"""Chart the paper ledger from Postgres: the one shared account, per-sleeve values, holdings and queued orders.
 
-Paper only. Reads the `equity`, `mom_equity`, `positions`, `orders`, `mom_orders` tables
-(no benchmark series is stored, so none is plotted). Writes one PNG and prints its path.
+Paper only. Reads `account_equity` (written by `trader daily`: cash + swing positions + momentum positions = account
+value), `positions` / `orders` (swing) and `mom_positions` / `mom_orders` (momentum). The two sleeves draw on ONE cash
+balance, so the equity panel is a stack: cash + swing + momentum = account value. No benchmark series is stored, so none
+is plotted. Writes one PNG and prints its path.
 
 Usage: uv run python scripts/paper_report_chart.py [--out PATH]
-Default output: $TRADER_CHART_DIR/paper_report_<latest equity date>.png (TRADER_CHART_DIR defaults to <repo>/charts).
+Default output: $TRADER_CHART_DIR/paper_report_<latest account date>.png (TRADER_CHART_DIR defaults to <repo>/charts).
 """
 from __future__ import annotations
 
@@ -16,12 +18,16 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
+import matplotlib.dates as mdates  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 from trader import db  # noqa: E402
+
+ROW_IN = 0.30  # inches per table row: tall enough for 9pt text, so no table is clipped
+COLORS = {"cash": "#9aa5b1", "swing": "#1f77b4", "mom": "#2ca02c", "paid": "#444444"}
 
 
 def _table(sql: str) -> pd.DataFrame:
@@ -31,93 +37,105 @@ def _table(sql: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _draw_table(ax, title: str, header: list[str], rows: list[list[str]], empty: str) -> None:
+    """A table filling its whole axes. The axes height is set from the row count by the caller."""
+    ax.axis("off")
+    ax.set_title(title, loc="left", fontsize=10, weight="bold")
+    if not rows:
+        ax.text(0.5, 0.5, empty, ha="center", va="center", transform=ax.transAxes, color="#666666")
+        return
+    t = ax.table(cellText=rows, colLabels=header, loc="center", cellLoc="center", bbox=[0, 0, 1, 1])
+    t.auto_set_font_size(False)
+    t.set_fontsize(9)
+
+
+def _n(rows: int) -> int:
+    return max(rows, 1) + 1  # header + rows (an empty table still shows one line of text)
+
+
 def build(out: Path) -> Path:
-    swing = _table("SELECT date, equity, invested FROM equity ORDER BY date")
-    mom = _table("SELECT date, value, deposited, equity FROM mom_equity ORDER BY date")
-    pos = _table("SELECT sym, strat, qty, entry_price, entry_date, last_close, init_stop, stop FROM positions ORDER BY sym")
-    orders = _table("SELECT sym, strat, entry_type, max_entry, stop, qty, est_entry FROM orders ORDER BY sym")
-    mom_orders = _table("SELECT side, symbol, reason, target_value FROM mom_orders ORDER BY symbol")
+    acct = _table("SELECT date, equity, value, cash, swing_value, mom_value, deposited FROM account_equity ORDER BY date")
+    swing_pos = _table("SELECT sym, strat, qty, entry_price, last_close, stop FROM positions ORDER BY sym")
+    swing_ord = _table("SELECT sym, strat, entry_type, max_entry, stop, qty, est_entry FROM orders ORDER BY sym")
+    mom_pos = _table("SELECT symbol, qty, entry_price, entry_date, last_close FROM mom_positions ORDER BY symbol")
+    mom_ord = _table("SELECT side, symbol, reason, target_value FROM mom_orders ORDER BY side, symbol")
 
-    fig = plt.figure(figsize=(11, 10), constrained_layout=True)
-    gs = fig.add_gridspec(3, 2, height_ratios=[1.3, 1, 1.1])
-    fig.suptitle("Paper ledger report (paper only, no real orders)", fontsize=14, weight="bold")
+    value = float(acct["value"].iloc[-1]) if not acct.empty else 0.0
+    mom_rows = []
+    for r in mom_pos.itertuples():
+        mv, pnl = float(r.last_close) * int(r.qty), (float(r.last_close) - float(r.entry_price)) * int(r.qty)
+        mom_rows.append([r.symbol, str(int(r.qty)), f"{float(r.entry_price):.2f}", f"{float(r.last_close):.2f}",
+                         f"{pnl:+,.0f}", f"{mv:,.0f}", f"{100 * mv / value:.1f}%" if value else "-"])
+    swing_rows = []
+    for r in swing_pos.itertuples():
+        mv, pnl = float(r.last_close) * int(r.qty), (float(r.last_close) - float(r.entry_price)) * int(r.qty)
+        swing_rows.append([r.sym, r.strat, str(int(r.qty)), f"{float(r.entry_price):.2f}", f"{float(r.last_close):.2f}",
+                           f"{pnl:+,.0f}", f"{mv:,.0f}", f"{float(r.stop):.2f}"])
+    order_rows = [["Swing", "BUY", r.sym, f"{r.entry_type}, qty {int(r.qty)}, est {float(r.est_entry):.2f}"
+                   + (f", max {float(r.max_entry):.2f}" if pd.notna(r.max_entry) else "") + f", stop {float(r.stop):.2f}"]
+                  for r in swing_ord.itertuples()]
+    order_rows += [["Momentum", str(r.side).upper(), r.symbol,
+                    (f"rebalance, target ₹{float(r.target_value):,.0f}" if pd.notna(r.target_value) else str(r.reason))]
+                   for r in mom_ord.itertuples()]
 
-    # Equity per sleeve, as INR and as % vs capital paid in.
-    ax = fig.add_subplot(gs[0, :])
-    if not swing.empty:
-        ax.plot(pd.to_datetime(swing["date"]), swing["equity"], marker="o", label="Swing sleeve equity (₹)")
-    if not mom.empty:
-        ax.plot(pd.to_datetime(mom["date"]), mom["value"], marker="s", label="Momentum sleeve value (₹)")
-        ax.plot(pd.to_datetime(mom["date"]), mom["deposited"], linestyle=":", color="grey", label="Momentum paid in (₹)")
-    ax.set_title("Equity by sleeve")
-    ax.set_ylabel("INR")
-    ax.ticklabel_format(axis="y", style="plain", useOffset=False)
-    ax.xaxis.set_major_locator(matplotlib.dates.DayLocator())
-    ax.xaxis.set_major_formatter(matplotlib.dates.DateFormatter("%Y-%m-%d"))
-    ax.grid(alpha=0.3)
-    ax.legend(loc="best")
-    if swing.empty and mom.empty:
-        ax.text(0.5, 0.5, "No equity rows yet", ha="center", va="center", transform=ax.transAxes)
+    ratios = [7, 2.6, _n(len(mom_rows)) + 1.2, _n(len(swing_rows)) + 1.2, _n(len(order_rows)) + 1.2]
+    fig = plt.figure(figsize=(11, sum(ratios) * ROW_IN + 1.0), constrained_layout=True)
+    gs = fig.add_gridspec(len(ratios), 1, height_ratios=ratios)
+    fig.suptitle("Paper ledger: one shared cash account (paper only, no real orders)", fontsize=14, weight="bold")
 
-    # Return since start per sleeve (%), from the first row of each sleeve.
-    ax2 = fig.add_subplot(gs[1, 0])
-    labels, vals = [], []
-    if not swing.empty:
-        s0 = float(swing["equity"].iloc[0])
-        labels.append("Swing")
-        vals.append((float(swing["equity"].iloc[-1]) / s0 - 1) * 100 if s0 else 0.0)
-    if not mom.empty:
-        paid = float(mom["deposited"].iloc[-1])
-        labels.append("Momentum")
-        vals.append((float(mom["value"].iloc[-1]) / paid - 1) * 100 if paid else 0.0)
-    if labels:
-        bars = ax2.bar(labels, vals, color=["#1f77b4", "#2ca02c"][: len(labels)])
-        ax2.axhline(0, color="black", lw=0.8)
-        for b, v in zip(bars, vals):
-            ax2.annotate(f"{v:+.2f}%", (b.get_x() + b.get_width() / 2, v), ha="center",
-                         xytext=(0, 4 if v >= 0 else -12), textcoords="offset points")
-        lim = max(1.0, max(abs(v) for v in vals) * 1.5)
-        ax2.set_ylim(-lim, lim)
-    ax2.set_title("Return since sleeve start (%)")
-    ax2.grid(axis="y", alpha=0.3)
-
-    # Open positions.
-    ax3 = fig.add_subplot(gs[1, 1])
-    ax3.axis("off")
-    ax3.set_title("Open positions (swing)")
-    if pos.empty:
-        ax3.text(0.5, 0.5, "No open positions", ha="center", va="center", transform=ax3.transAxes)
+    # 1. Account value, stacked: cash + swing positions + momentum positions = account equity.
+    ax = fig.add_subplot(gs[0])
+    if acct.empty:
+        ax.text(0.5, 0.5, "No account rows yet (run `trader daily`)", ha="center", va="center", transform=ax.transAxes)
+        ax.axis("off")
     else:
-        rows = []
-        for r in pos.itertuples():
-            pnl = (float(r.last_close) - float(r.entry_price)) * int(r.qty)
-            rows.append([r.sym, r.strat, str(int(r.qty)), f"{float(r.entry_price):.2f}",
-                         f"{float(r.last_close):.2f}", f"{pnl:+.0f}", f"{float(r.stop):.2f}"])
-        t = ax3.table(cellText=rows, colLabels=["Sym", "Strat", "Qty", "Entry", "Last", "P/L ₹", "Stop"],
-                      loc="center", cellLoc="center")
-        t.auto_set_font_size(False)
-        t.set_fontsize(9)
-        t.scale(1, 1.4)
+        d = pd.to_datetime(acct["date"])
+        ax.stackplot(d, acct["cash"], acct["swing_value"], acct["mom_value"], step="post", alpha=0.85,
+                     colors=[COLORS["cash"], COLORS["swing"], COLORS["mom"]],
+                     labels=["Cash", "Swing positions", "Momentum positions"])
+        ax.step(d, acct["deposited"], where="post", color=COLORS["paid"], linestyle=":", label="Paid in")
+        ax.plot(d, acct["value"], color="black", lw=1.2, marker="o", ms=3, label="Account equity")
+        last = acct.iloc[-1]
+        ax.annotate(f"₹{last['value']:,.0f}", (d.iloc[-1], last["value"]), xytext=(-6, 8), textcoords="offset points",
+                    ha="right", weight="bold")
+        ax.set_title(f"Account equity ₹{last['value']:,.0f} = cash ₹{last['cash']:,.0f} + swing ₹{last['swing_value']:,.0f}"
+                     f" + momentum ₹{last['mom_value']:,.0f}   (paid in ₹{last['deposited']:,.0f})", loc="left", fontsize=10)
+        ax.set_ylim(0, float(max(acct["value"].max(), acct["deposited"].max())) * 1.2)  # headroom for the legend
+        ax.set_ylabel("INR")
+        ax.ticklabel_format(axis="y", style="plain", useOffset=False)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+        ax.grid(alpha=0.3)
+        ax.legend(loc="upper left", ncol=5, fontsize=8)
 
-    # Orders queued for the next session + momentum orders.
-    ax4 = fig.add_subplot(gs[2, :])
-    ax4.axis("off")
-    ax4.set_title("Queued for next session")
-    if orders.empty and mom_orders.empty:
-        ax4.text(0.5, 0.5, "No orders queued", ha="center", va="center", transform=ax4.transAxes)
+    # 2. Latest composition and profit over money paid in.
+    ax2 = fig.add_subplot(gs[1])
+    if acct.empty:
+        ax2.axis("off")
     else:
-        rows = [[r.sym, r.strat, r.entry_type, f"{float(r.max_entry):.2f}" if pd.notna(r.max_entry) else "-",
-                 f"{float(r.stop):.2f}" if pd.notna(r.stop) else "-", str(int(r.qty)),
-                 f"{float(r.est_entry):.2f}" if pd.notna(r.est_entry) else "-"] for r in orders.itertuples()]
-        if rows:
-            t = ax4.table(cellText=rows, colLabels=["Sym", "Strat", "Type", "Max", "Stop", "Qty", "Est."],
-                          loc="upper center", cellLoc="center")
-            t.auto_set_font_size(False)
-            t.set_fontsize(9)
-            t.scale(1, 1.4)
-        if not mom_orders.empty:
-            txt = "Momentum orders: " + ", ".join(f"{r.side} {r.symbol}" for r in mom_orders.itertuples())
-            ax4.text(0.0, 0.0, txt, transform=ax4.transAxes, fontsize=9)
+        last = acct.iloc[-1]
+        left = 0.0
+        for key, label in (("cash", "Cash"), ("swing_value", "Swing"), ("mom_value", "Momentum")):
+            v = float(last[key])
+            c = COLORS["cash" if key == "cash" else "swing" if key == "swing_value" else "mom"]
+            ax2.barh([0], [v], left=left, color=c, label=label)
+            if value and v / value > 0.06:
+                ax2.text(left + v / 2, 0, f"{label}\n₹{v:,.0f} ({100 * v / value:.0f}%)", ha="center", va="center",
+                         color="white", fontsize=8, weight="bold")
+            left += v
+        profit = float(last["value"] - last["deposited"])
+        ax2.set_title(f"Where the account is now. Profit over paid in: ₹{profit:+,.0f} "
+                      f"({100 * profit / float(last['deposited']):+.2f}%)", loc="left", fontsize=10)
+        ax2.set_yticks([])
+        ax2.set_xlim(0, max(value, 1))
+        ax2.ticklabel_format(axis="x", style="plain", useOffset=False)
+
+    # 3-5. Tables, each in an axes tall enough for its rows.
+    _draw_table(fig.add_subplot(gs[2]), f"Momentum holdings ({len(mom_rows)})",
+                ["Sym", "Qty", "Entry", "Last", "P/L ₹", "Value ₹", "% of account"], mom_rows, "No momentum holdings")
+    _draw_table(fig.add_subplot(gs[3]), f"Swing open positions ({len(swing_rows)})",
+                ["Sym", "Strat", "Qty", "Entry", "Last", "P/L ₹", "Value ₹", "Stop"], swing_rows, "No swing positions")
+    _draw_table(fig.add_subplot(gs[4]), f"Queued for the next session ({len(order_rows)})",
+                ["Sleeve", "Side", "Sym", "Detail"], order_rows, "No orders queued")
 
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=130)
@@ -130,7 +148,7 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
     if args.out is None:
-        d = _table("SELECT max(date) AS d FROM equity")
+        d = _table("SELECT max(date) AS d FROM account_equity")
         stamp = str(d["d"].iloc[0])[:10] if not d.empty and d["d"].iloc[0] is not None else "latest"
         chart_dir = Path(os.environ.get("TRADER_CHART_DIR", REPO / "charts"))
         args.out = chart_dir / f"paper_report_{stamp}.png"
