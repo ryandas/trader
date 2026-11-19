@@ -18,12 +18,14 @@ AQR, arXiv q-fin, NSE/BSE methodologies, Indian journals), at most 5 new rows pe
 
 | slug | idea | mechanism | source |
 |---|---|---|---|
-| regime_switch | Regime-switched momentum and reversal: when the index is in a calm state use 12-1 momentum, in a crash state use 1-month reversal. Proxy (deviation from paper): crash state = index 20-day volatility above its trailing 1-year 80th (or 90th) percentile. The paper uses a Hidden Markov Model; this proxy avoids a new dependency and is a separate idea. Grid (fixed now): calm/crash percentile 0.8 or 0.9, top_n 10, buffer 5, rebalance M, bear_exit on. | Momentum and reversal are regime-dependent complements; momentum's information coefficient drops in crashes while reversal's rises (paper abstract). | Regime-Dependent Price Formation in Indian Equities (SSRN abstract 7044244, posted 2 Jul 2026, working paper; abstract opened 2026-11-18, full text not read). |
+| low_vol | Low-volatility ranking: lowest trailing realised daily volatility (top 10, quarterly, buffer 5; grid fixed: window 126 or 252). | Investors overpay for volatile/lottery-like stocks and leverage-constrained investors tilt to high beta, so low-risk names earn higher risk-adjusted returns. | NSE low-risk anomaly study Jan 2001-Jun 2016 (abstract seen via search 2026-11-19); Agarwalla et al. 2014 BAB India (seen cited). Journal articles; effect size sample-dependent. |
+| high_52w | Nearness to 52-week high: close / trailing 252-bar max (top 10, buffer 5; grid fixed: rebalance M or Q). | Anchoring: investors under-react to news near the 52-week high, so near-high stocks keep outperforming. | George and Hwang (2004), Journal of Finance 59(4) (US; abstract seen via search 2026-11-19; no India ranking study found). Published effect may have weakened. Journal article. |
 
 ## Done
 
 | slug | date | verdict | note |
 |---|---|---|---|
+| regime_switch | 2026-11-19 | FAIL | beats_index_and_basket: 13.3% vs index 12.74% vs basket 16.1%; other gates passed (DSR 0.976, 1 trial). Not a cost effect. |
 
 Fresh start 2026-11-18 (second reset, at the user's request): the trial registry (now counting from 0) and the journal were
 emptied, and the Done table below was cleared. The earlier verdicts (frog_pan, int_mom, max_lottery, trend_ma, str_rev,

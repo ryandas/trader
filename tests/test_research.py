@@ -318,3 +318,17 @@ def test_max_lottery_penalises_a_single_huge_day():
     assert np.isnan(s[:20]).all()
     assert s[55, 0] > s[55, 1]  # window still contains the jump
     assert s[45, 1] > s[45, 0]  # before the jump LOTTO has the smaller max return, so it ranks higher: the jump flips it
+
+
+def test_regime_switch_crash_state_and_blend_use_only_past_bars():
+    from trader.research.candidates import regime_switch as rs
+    rng = np.random.default_rng(1)
+    idx = pd.bdate_range("2020-01-01", periods=600)
+    r = rng.normal(0, 0.005, 600)
+    r[500:] *= 5  # volatility spike
+    b = pd.Series(100 * np.cumprod(1 + r), index=idx)
+    full = rs.crash_state(b, 0.8)
+    assert full.iloc[520:540].any() and not full.iloc[:260].any()
+    assert (rs.crash_state(b.iloc[:450], 0.8).to_numpy() == full.iloc[:450].to_numpy()).all()
+    out = rs.blend(np.ones((3, 2)), np.zeros((3, 2)), np.array([False, True, False]))
+    assert out[:, 0].tolist() == [1, 0, 1]

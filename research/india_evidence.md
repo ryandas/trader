@@ -9,3 +9,8 @@ Seed/queue ideas come from US-centred literature unless noted. Searches are WebS
 - Frog in the pan (Da, Gurun, Warachka, RFS 2014, 27(7) 2171-2218; citation confirmed on EconPapers/IDEAS): US only; no Indian test found.
 - Novy-Marx (JFE 2012, 103(3) 429-453; citation confirmed): 12-7 month returns drive momentum; challenged by Goyal & Wahal (JFQA 2015) and a January-seasonality critique. No Indian test found.
 - Trend factor (Han, Zhou, Zhu, JFE 2016; seen via CXO Advisory / WUSTL profile): MA signals of many lengths; US gross 1.63%/month; turnover ~66%/month (bad fit for small accounts unless slowed down).
+
+## 2026-11-19 (refill round)
+- Low volatility / BAB in India: NSE study Jan 2001-Jun 2016 reports low-risk (large-cap) portfolios outperforming; Agarwalla et al. (2014) find significant BAB returns; an NSE 2010-2020 study finds the volatility anomaly stronger at medium/long horizons; BAB premium small vs size and value; robustness to removing small/illiquid stocks mixed (abstracts only).
+- 52-week high (George and Hwang 2004, JF): no Indian portfolio test found; only an IIMA options-market anchoring paper and an unattributed 20-market study (profits in 18 of 20). A 2022 Indian study finds daily extremes are not used as anchors (different object).
+- Regime-switch (SSRN 7044244): abstract only; no independent replication seen.
