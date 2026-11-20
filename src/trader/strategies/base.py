@@ -8,8 +8,14 @@ import pandas as pd
 from .. import indicators as ind
 
 
-def features(df: pd.DataFrame, min_price: float = 50, min_value_cr: float = 10) -> pd.DataFrame:
-    """Per-symbol indicator frame. Every column at row t uses only bars <= t."""
+def features(df: pd.DataFrame, min_price: float = 50, min_value_cr: float = 10,
+             shares_outstanding: float | pd.Series | None = None) -> pd.DataFrame:
+    """Per-symbol indicator frame. Every column at row t uses only bars <= t.
+
+    Liquidity columns: `amihud_20` (20-bar mean of |return| / (volume x close); zero-volume bars are skipped as NaN),
+    `vol_trend_20` (volume / 20-bar mean volume, today's bar included) and `turnover_20` (20-bar mean of volume / shares).
+    Shares are not stored in the database, so `turnover_20` is NaN unless the caller passes `shares_outstanding`
+    (a scalar, or a series indexed like `df` that is itself known as of each bar)."""
     f = df[["open", "high", "low", "close", "volume"]].copy()
     c = f["close"]
     f["sma5"] = ind.sma(c, 5)
@@ -25,6 +31,11 @@ def features(df: pd.DataFrame, min_price: float = 50, min_value_cr: float = 10) 
     # Cross-sectionally comparable strength score (ranking is identical vs. any common benchmark)
     f["rs"] = 0.5 * ind.roc(c, 63) + 0.5 * ind.roc(c, 126)
     value_cr = (c * f["volume"]).rolling(20, min_periods=20).median() / 1e7
+    traded = (c * f["volume"]).where(f["volume"] > 0)
+    f["amihud_20"] = (c.pct_change(fill_method=None).abs() / traded).rolling(20, min_periods=20).mean()
+    f["vol_trend_20"] = f["volume"] / f["volume"].rolling(20, min_periods=20).mean()
+    shares = np.nan if shares_outstanding is None else shares_outstanding
+    f["turnover_20"] = (f["volume"] / shares).rolling(20, min_periods=20).mean()
     f["liquid"] = (value_cr >= min_value_cr) & (c >= min_price)
     return f
 

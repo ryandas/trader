@@ -372,3 +372,33 @@ def test_regime_switch_crash_state_and_blend_use_only_past_bars():
     assert (rs.crash_state(b.iloc[:450], 0.8).to_numpy() == full.iloc[:450].to_numpy()).all()
     out = rs.blend(np.ones((3, 2)), np.zeros((3, 2)), np.array([False, True, False]))
     assert out[:, 0].tolist() == [1, 0, 1]
+
+
+# ---------------------------------------------------------------- liquidity layer
+def test_prepare_has_volume_matrix_and_truncate_keeps_it(monkeypatch):
+    cfg, prep, idx = mom_world(monkeypatch)
+    assert prep.volume_matrix.shape == prep.c.shape
+    assert mom.truncate(prep, 300).volume_matrix.shape[0] == 301
+
+
+def test_liquidity_features_and_amihud_candidate_have_no_lookahead(monkeypatch):
+    from trader.research.candidates import amihud
+    from trader.strategies import features
+    df = synth(400, seed=7)
+    f = features(df)
+    assert {"amihud_20", "turnover_20", "vol_trend_20"} <= set(f.columns)
+    r = df["close"].pct_change().abs()
+    assert f["amihud_20"].iloc[-1] == pytest.approx((r / (df["close"] * df["volume"])).iloc[-20:].mean())
+    assert f["vol_trend_20"].iloc[-1] == pytest.approx(df["volume"].iloc[-1] / df["volume"].iloc[-20:].mean())
+    assert f["turnover_20"].isna().all()
+    assert features(df, shares_outstanding=1e8)["turnover_20"].iloc[-1] == pytest.approx(df["volume"].iloc[-20:].mean() / 1e8)
+    d2 = df.copy()
+    d2.iloc[300:, d2.columns.get_loc("volume")] *= 9  # future bars must not change earlier rows
+    g = features(d2)
+    for col in ("amihud_20", "vol_trend_20"):
+        pd.testing.assert_series_equal(f[col].iloc[:300], g[col].iloc[:300])
+    cfg, prep, idx = mom_world(monkeypatch)
+    s = amihud.score(prep, 20)
+    assert s.shape == prep.c.shape and np.isfinite(s[-1]).any()
+    ok, why = evaluate.lookahead_guard(prep, _as_candidate(monkeypatch, lambda p, **k: amihud.score(p, 20), "amihud_t"))
+    assert ok, why

@@ -84,6 +84,31 @@ class MomPrep:
     sectors: list | None = None  # sector label per symbol (same order as syms)
     rebal_q: np.ndarray | None = None  # True on the last trading day of a quarter
     rebal_s: np.ndarray | None = None  # True on the last trading day of a half-year (Jun / Dec)
+    volume_df: pd.DataFrame | None = None  # daily share volume (dates x syms), NaN where no bar; mask with `liquid` for the universe
+
+    @property
+    def volume_matrix(self) -> np.ndarray:
+        if self.volume_df is None:
+            raise ValueError("this prep has no volume matrix")
+        return self.volume_df.to_numpy()
+
+    def amihud(self, window: int = 20) -> np.ndarray:
+        """(dates x syms) Amihud illiquidity: mean of |return| / (volume x close) over `window` bars (higher = less liquid).
+        Zero-volume days are NaN. Row t uses bars <= t only; cached."""
+        key = ("amihud", window)
+        if key not in self._scores:
+            traded = (self.close_df * self.volume_df).where(self.volume_df > 0)
+            r = self.close_df.pct_change(fill_method=None).abs()
+            self._scores[key] = (r / traded).rolling(window, min_periods=window).mean().to_numpy()
+        return self._scores[key]
+
+    def vol_trend(self, window: int = 20) -> np.ndarray:
+        """(dates x syms) volume / its `window`-bar mean (today included); cached."""
+        key = ("vol_trend", window)
+        if key not in self._scores:
+            v = self.volume_df
+            self._scores[key] = (v / v.rolling(window, min_periods=window).mean()).to_numpy()
+        return self._scores[key]
 
     def rebal_mask(self, code: str) -> np.ndarray:
         m = {"M": self.rebal, "W": self.rebal_w, "Q": self.rebal_q, "S": self.rebal_s}[code]
@@ -135,6 +160,7 @@ def truncate(prep: MomPrep, t: int) -> MomPrep:
         rebal_w=None if prep.rebal_w is None else prep.rebal_w[:k],
         bench_close=None if prep.bench_close is None else prep.bench_close[:k], sectors=prep.sectors,
         rebal_q=None if prep.rebal_q is None else prep.rebal_q[:k], rebal_s=None if prep.rebal_s is None else prep.rebal_s[:k],
+        volume_df=None if prep.volume_df is None else prep.volume_df.iloc[:k],
     )
 
 
@@ -193,7 +219,7 @@ def prepare(cfg: Config, instruments: pd.DataFrame, liquid_top: int | None = Non
     return MomPrep(
         dates, syms, raw("open").to_numpy(), close.to_numpy(),
         liquid.to_numpy(dtype=bool), above200.to_numpy(dtype=bool), mkt, rebal, close,
-        rebal_w=rebal_w, rebal_q=rebal_q, rebal_s=rebal_s,
+        rebal_w=rebal_w, rebal_q=rebal_q, rebal_s=rebal_s, volume_df=raw("volume"),
         bench_close=bench["close"].reindex(dates).ffill().to_numpy(),
         sectors=(instruments.set_index("symbol")["sector"].reindex(syms).fillna("Unknown").tolist() if "sector" in instruments else None),
     )
