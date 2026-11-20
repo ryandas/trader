@@ -18,7 +18,13 @@ AQR, arXiv q-fin, NSE/BSE methodologies, Indian journals), at most 5 new rows pe
 
 | slug | idea | mechanism | source |
 |---|---|---|---|
-| (empty) | Price/volume queue is EMPTY: no backtestable idea queued. Liquidity ideas (Amihud) need a volume matrix in `MomPrep` first. | | |
+| frog_pan | Frog-in-the-pan (ID reversion): rank by most-negative recent returns (momentum-inverse), 1-month holding. | Mean reversion: extreme losers tend to bounce. | SSRN, prior trial at 5k. |
+| int_mom | Interaction momentum: rank by corr(return, volume) over lookback, long corr>0. | High volume accompanies rises; sustains due to info. | SSRN, prior trial at 5k. |
+| max_lottery | Max daily return in lookback: long top-N by highest 1-day return in past month. | Lottery demand drives extremes. | SSRN, prior trial at 5k. |
+| trend_ma | Trend MA: buy if close > 200 SMA and momentum > 0, hold, exit at stop. | Simple trend-following. | Backtest-only, prior trial at 5k. |
+| str_rev | Short-term reversal: rank by prior 1-week return (reverse), 1-month hold. | Microstructure reversal within week. | Blitz & Liu, prior trial at 5k. |
+| vol_mom | Volatility-managed momentum: rank by return / realized volatility, long top-N, 1-month hold. | Sharpe-like scoring; volatility drag penalizes high-vol winners. | Academic factor, prior trial at 5k. |
+| frog_pan_winners | Frog-in-the-pan applied only to PRET>0 (profitable) stocks: ID rank among winners, avoid losers. | Reversion is smoother in profitable companies. | Derivative of frog_pan trial result. |
 
 ## Done
 
