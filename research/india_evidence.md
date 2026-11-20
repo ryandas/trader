@@ -29,3 +29,6 @@ Seed/queue ideas come from US-centred literature unless noted. Searches are WebS
 - Quantpedia summaries (seen, not opened in full): Atilgan et al. across 27 EMs find medium/short-term momentum the most robust cross-sectional effect; Alpha Architect summary: short-term momentum persists in liquid stocks, reversal sits in illiquid names (near-duplicates of tested momentum ideas).
 - Indian liquidity/risk studies seen in snippets: NMIMS Management Review (Nifty 500, 2000-2018, Amihud, turnover rate; liquidity-augmented FF3 fits best); Joshipura (top 500 NSE, 2004-2018, low-risk effect holds after controlling liquidity); IIMB (NSE 2010-2020, volatility anomaly stronger at medium/long horizons); Saraf and Kayal (MSE WP 2022-215). No new queueable price-only idea (Amihud needs volume, not in the prep).
 - A freefincal blog (Apr 2026) on turnover filters: unreviewed blog, not used as an idea source.
+
+## 2026-11-20 (fifth round, queue refill search)
+- One standard search (price-based anomalies, India/EM): only low-risk/volatility (already tested as low_vol), idiosyncratic volatility (mixed sign across Indian studies; snippets only, not opened) and a 12-anomaly 2000-2020 Indian study (size, B/M, momentum/reversal, asset growth) surfaced. Nothing new that is price/volume-only, low-turnover and has an opened source. Queue stays empty; verdict NO IDEA.
