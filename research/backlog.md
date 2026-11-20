@@ -18,7 +18,6 @@ AQR, arXiv q-fin, NSE/BSE methodologies, Indian journals), at most 5 new rows pe
 
 | slug | idea | mechanism | source |
 |---|---|---|---|
-| frog_pan | Frog-in-the-pan (ID reversion): rank by most-negative recent returns (momentum-inverse), 1-month holding. | Mean reversion: extreme losers tend to bounce. | SSRN, prior trial at 5k. |
 | int_mom | Interaction momentum: rank by corr(return, volume) over lookback, long corr>0. | High volume accompanies rises; sustains due to info. | SSRN, prior trial at 5k. |
 | max_lottery | Max daily return in lookback: long top-N by highest 1-day return in past month. | Lottery demand drives extremes. | SSRN, prior trial at 5k. |
 | trend_ma | Trend MA: buy if close > 200 SMA and momentum > 0, hold, exit at stop. | Simple trend-following. | Backtest-only, prior trial at 5k. |
@@ -38,6 +37,7 @@ AQR, arXiv q-fin, NSE/BSE methodologies, Indian journals), at most 5 new rows pe
 
 | nse_norm_mom | 2026-11-19 | FAIL | beats_index_and_basket: 6.9% vs index 12.74% vs basket 16.1%; DSR 0.784 (6 trials). Not a cost effect (charges 0.62%/yr; no better at 100,000). Exposure low (bear exit / regime filter). Correlation with momentum 0.85. |
 | quality_india | 2026-11-19 | FORWARD_ONLY | Fundamentals, no backtest. Gates: no_lookahead, snapshots (1), not_a_duplicate (corr 0.03) all pass. Trial 7. Awaiting approval to promote. |
+| frog_pan | 2026-11-20 | FAIL | beats_index_and_basket: 10.73% vs index 13.09% vs basket 16.5%; also most-years (3/6), grid robustness, DSR 0.947 (8 trials). Charges 1.02%/yr, not a cost effect. 25k: 15.0%, 100k: 16.6% (informational). |
 
 Fresh start 2026-11-18 (second reset, at the user's request): the trial registry (now counting from 0) and the journal were
 emptied, and the Done table below was cleared. The earlier verdicts (frog_pan, int_mom, max_lottery, trend_ma, str_rev,
